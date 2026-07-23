@@ -1,4 +1,18 @@
-server.exe
+# Build artifacts
 *.exe
+*.o
+*.obj
+
+# IDE / editor
 .vscode/
 .cph/
+.idea/
+__pycache__/
+*.pyc
+
+# Runtime logs (generated at runtime)
+logs/
+
+# Data files (regeneratable via python/data.py or start.bat)
+# Uncomment the line below to stop tracking CSVs:
+# data/*.csv
