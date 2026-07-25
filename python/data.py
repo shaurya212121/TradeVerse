@@ -4,7 +4,10 @@ import time
 import os
 
 # Stocks to fetch
-stocks = ["AAPL", "TSLA", "TCS.NS", "RELIANCE.NS", "HDFCBANK.NS"]
+stocks = [
+    "AAPL", "TSLA", "TCS.NS", "RELIANCE.NS", "HDFCBANK.NS",
+    "GOOGL", "AMZN", "MSFT", "NVDA", "INFY.NS"
+]
 all_data = []
 
 print("Initiating Historical Tick Download (1-Minute Intervals)...")
