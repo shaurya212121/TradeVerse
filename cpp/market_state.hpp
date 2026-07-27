@@ -149,6 +149,42 @@ inline void async_flush_thread() {
 }
 
 // ============================================================================
+//  QUERY HELPERS — HISTORY
+// ============================================================================
+
+inline std::string get_history_display(int limit = 20) {
+    std::lock_guard<std::mutex> lock(history_lock);
+    if (trade_history.empty()) return "HISTORY | No trades recorded yet.";
+
+    std::ostringstream oss;
+    oss << "TRADE HISTORY (last " << std::min(limit, (int)trade_history.size()) << " trades)\n"
+        << std::string(72, '=') << "\n";
+    oss << std::left
+        << std::setw(6)  << "ID"
+        << std::setw(8)  << "ACTION"
+        << std::setw(14) << "TICKER"
+        << std::setw(8)  << "QTY"
+        << std::setw(12) << "PRICE ($)"
+        << std::setw(22) << "TIMESTAMP"
+        << "STATUS\n" << std::string(72, '-') << "\n";
+
+    int start = std::max(0, (int)trade_history.size() - limit);
+    for (int i = (int)trade_history.size() - 1; i >= start; --i) {
+        const auto& t = trade_history[i];
+        oss << std::fixed << std::setprecision(2)
+            << std::left << std::setw(6)  << t.trade_id
+            << std::left << std::setw(8)  << t.action
+            << std::left << std::setw(14) << t.ticker
+            << std::left << std::setw(8)  << t.qty
+            << std::left << std::setw(12) << t.price
+            << std::left << std::setw(22) << t.timestamp
+            << (t.cancelled ? "CANCELLED" : "EXECUTED") << "\n";
+    }
+    oss << std::string(72, '=');
+    return oss.str();
+}
+
+// ============================================================================
 //  PRICE SIMULATOR
 // ============================================================================
 

@@ -23,15 +23,22 @@ for ticker in stocks:
 
             if isinstance(df.columns, pd.MultiIndex):
                 clean_df["PRICE"] = df["Close"].iloc[:, 0].values
+                clean_df["VOLUME"] = df["Volume"].iloc[:, 0].values
             else:
                 clean_df["PRICE"] = df["Close"].values
+                clean_df["VOLUME"] = df["Volume"].values
+
+            # Drop rows where PRICE or VOLUME is NaN
+            clean_df = clean_df.dropna(subset=["PRICE", "VOLUME"])
+            # Convert volume to integer
+            clean_df["VOLUME"] = clean_df["VOLUME"].astype(int)
 
             all_data.append(clean_df)
         else:
-            print(f"⚠️ No data found for {ticker}. It may be delisted or inactive.")
+            print(f"  No data found for {ticker}. It may be delisted or inactive.")
 
     except Exception as e:
-        print(f"❌ Failed to download {ticker}: {e}")
+        print(f"  Failed to download {ticker}: {e}")
 
     time.sleep(1)
 
@@ -50,6 +57,8 @@ if all_data:
     final_df.to_csv(output_path, index=False)
 
     total_rows = len(final_df)
-    print(f"✅ Success! Saved {total_rows} chronological ticks to {output_path}.")
+    print(f"Success! Saved {total_rows} chronological ticks to {output_path}.")
+    print(f"Columns: {list(final_df.columns)}")
+    print(final_df.head(3).to_string())
 else:
-    print("\n❌ Critical Failure: No data was fetched. Check your network.")
+    print("\nCritical Failure: No data was fetched. Check your network.")
