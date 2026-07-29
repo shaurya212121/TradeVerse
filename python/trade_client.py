@@ -4,10 +4,11 @@ import sys
 def main():
     context = zmq.Context()
 
-    print("🔌 Connecting to TradeVerse Engine on port 5556...")
+    print("Connecting to TradeVerse Engine on port 5556...")
     socket = context.socket(zmq.REQ)
-    socket.connect("tcp://localhost:5556")
-    print("✅ Connected! System ready for trading.\n")
+    socket.setsockopt(zmq.RCVTIMEO, 8000)          # 8s timeout — never hang forever
+    socket.connect("tcp://localhost:5556")          # always connect to local server
+    print("Connected! System ready for trading.\n")
 
     print("=" * 64)
     print("  TRADEVERSE — COMMAND REFERENCE")
@@ -15,11 +16,11 @@ def main():
     print("  MARKET ORDERS:")
     print("    BUY:<TICKER>:<QTY>      Buy shares    (e.g., BUY:AAPL:10)")
     print("    SELL:<TICKER>:<QTY>     Sell shares   (e.g., SELL:TSLA:5)")
-    print("    CANCEL:<TRADE_ID>      Cancel trade  (e.g., CANCEL:3)")
+    print("    CANCEL:<TRADE_ID>       Cancel trade  (e.g., CANCEL:3)")
     print()
     print("  LIMIT ORDERS (Order Book):")
     print("    LIMIT_BUY:<TICKER>:<QTY>:<PRICE>   Limit buy  (e.g., LIMIT_BUY:AAPL:10:220.50)")
-    print("    LIMIT_SELL:<TICKER>:<QTY>:<PRICE>   Limit sell (e.g., LIMIT_SELL:AAPL:5:225.00)")
+    print("    LIMIT_SELL:<TICKER>:<QTY>:<PRICE>  Limit sell (e.g., LIMIT_SELL:AAPL:5:225.00)")
     print("    CANCEL_ORDER:<ORDER_ID>             Cancel resting order (e.g., CANCEL_ORDER:7)")
     print()
     print("  QUERY COMMANDS:")
@@ -48,14 +49,23 @@ def main():
             socket.send_string(command)
 
             # Receive response from worker thread
-            response = socket.recv_string()
-            print(f"\n📩 [Server Response]:\n{response}\n")
+            try:
+                response = socket.recv_string()
+                print(f"\n[Server Response]:\n{response}\n")
+            except zmq.Again:
+                print("\n[TIMEOUT] Server did not respond in 8 seconds.")
+                print("Check that start.bat is running in another terminal.\n")
+                # Reconnect socket so next command works cleanly
+                socket.close()
+                socket = context.socket(zmq.REQ)
+                socket.setsockopt(zmq.RCVTIMEO, 8000)
+                socket.connect("tcp://localhost:5556")
 
         except KeyboardInterrupt:
             print("\nTerminated by user.")
             break
         except Exception as e:
-            print(f"❌ Communication Error: {e}")
+            print(f"Communication Error: {e}")
             break
 
     socket.close()

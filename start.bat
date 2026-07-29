@@ -7,7 +7,7 @@ echo  ========================================
 echo.
 
 :: Step 1: Fetch latest market data from Yahoo Finance
-echo [1/3] Syncing latest market data from Yahoo Finance...
+echo [1/4] Syncing latest market data from Yahoo Finance...
 echo.
 python python\data.py
 if %ERRORLEVEL% NEQ 0 (
@@ -23,8 +23,13 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo.
 
-:: Step 2: Build the server
-echo [2/3] Compiling server...
+:: Step 2: Kill any running server instance (Windows locks .exe while it runs)
+echo [2/4] Stopping any running server instance...
+taskkill /F /IM server.exe >nul 2>&1
+timeout /t 1 /nobreak >nul
+
+:: Step 3: Build the server
+echo [3/4] Compiling server...
 cd cpp
 g++ -std=c++17 -O2 -o server.exe server.cpp -lzmq -lws2_32 -lpthread
 if %ERRORLEVEL% NEQ 0 (
@@ -38,6 +43,6 @@ cd ..
 echo.
 
 :: Step 3: Launch the server
-echo [3/3] Starting TradeVerse server...
+echo [4/4] Starting TradeVerse server...
 echo.
 cpp\server.exe

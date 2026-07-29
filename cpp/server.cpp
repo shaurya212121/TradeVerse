@@ -12,8 +12,6 @@
 
 std::string get_portfolio_display() {
     std::lock_guard<std::mutex> lock(market_lock);
-    std::lock_guard<std::mutex> olock(orderbook_lock);
-
     if (live_market_prices.empty()) return "ERROR | No market data loaded.";
 
     std::ostringstream oss;
@@ -27,11 +25,8 @@ std::string get_portfolio_display() {
         << "\n" << std::string(72, '-') << "\n";
 
     for (const auto& [ticker, info] : live_market_prices) {
-        double best_bid = 0.0, best_ask = 0.0;
-        if (order_books.count(ticker)) {
-            if (!order_books[ticker].bids.empty()) best_bid = order_books[ticker].bids.begin()->first;
-            if (!order_books[ticker].asks.empty()) best_ask = order_books[ticker].asks.begin()->first;
-        }
+        // get_best_bid_ask locks this ticker's own book_lock internally
+        auto [best_bid, best_ask] = get_best_bid_ask(ticker);
         oss << std::fixed << std::setprecision(2)
             << std::left << std::setw(14) << ticker
             << std::left << std::setw(14) << info.price
@@ -47,12 +42,12 @@ std::string get_portfolio_display() {
 std::string get_status_display() {
     std::lock_guard<std::mutex> mlock(market_lock);
     std::lock_guard<std::mutex> hlock(history_lock);
-    std::lock_guard<std::mutex> olock(orderbook_lock);
 
     std::ostringstream oss;
     oss << "STATUS_CHECK | TradeVerse Server\n" << std::string(40, '=') << "\n";
     oss << "  Tickers loaded      : " << live_market_prices.size() << "\n";
     oss << "  Order books seeded  : " << order_books.size() << "\n";
+    oss << "  Active shards       : " << shards.size() << "\n";
     oss << "  Trades executed     : " << trade_history.size() << "\n";
     oss << "  Next trade ID       : " << next_trade_id.load() << "\n";
     oss << "  Next order ID       : " << next_order_id.load() << "\n";
@@ -145,7 +140,7 @@ void chatbox_worker_routine(zmq::context_t* context) {
         client_msg = trim(client_msg);
         std::string reply_msg;
 
-        // ---- LIMIT ORDERS ----
+        try {
         if (client_msg.rfind("LIMIT_BUY:", 0) == 0) {
             std::stringstream ss(client_msg);
             std::string cmd, ticker, qty_str, price_str;
@@ -227,6 +222,11 @@ void chatbox_worker_routine(zmq::context_t* context) {
                         "  LIMIT_BUY:<TICKER>:<QTY>:<PRICE>  LIMIT_SELL:<TICKER>:<QTY>:<PRICE>\n"
                         "  CANCEL_ORDER:<ORDER_ID>  ORDERBOOK:<TICKER>\n"
                         "  FETCH:<TICKER>  PORTFOLIO  HISTORY  STATUS_CHECK";
+        }
+        } catch (const std::exception& e) {
+            reply_msg = std::string("ERROR | Server exception: ") + e.what();
+        } catch (...) {
+            reply_msg = "ERROR | Unknown server exception.";
         }
 
         zmq::message_t reply(reply_msg.size());
@@ -321,7 +321,10 @@ int main() {
 
     replay_wal();
 
-    std::thread queue_worker(order_queue_processor_thread); queue_worker.detach();
+    // Launch one dedicated processor thread per ticker (per-ticker parallelism)
+    for (const auto& [ticker, info] : live_market_prices) {
+        std::thread(ticker_processor_thread, ticker).detach();
+    }
     std::thread flush_worker(async_flush_thread); flush_worker.detach();
     std::thread sim_worker(price_simulator_thread); sim_worker.detach();
     std::thread proxy_worker(run_chatbox_proxy_server); proxy_worker.detach();

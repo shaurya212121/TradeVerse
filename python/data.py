@@ -49,12 +49,18 @@ if all_data:
     final_df = pd.concat(all_data, ignore_index=True)
     final_df = final_df.sort_values(by="TIMESTAMP")
 
-    # Save to data/ directory (relative to project root)
-    output_path = os.path.join(os.path.dirname(__file__), "..", "data", "market_data1.csv")
-    output_path = os.path.normpath(output_path)
+    # Build absolute path — avoids OSError 22 on Windows OneDrive paths with spaces
+    script_dir = os.path.abspath(os.path.dirname(__file__))
+    project_root = os.path.abspath(os.path.join(script_dir, ".."))
+    data_dir = os.path.join(project_root, "data")
+    output_path = os.path.join(data_dir, "market_data1.csv")
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    final_df.to_csv(output_path, index=False)
+    os.makedirs(data_dir, exist_ok=True)
+
+    # Write via open() with explicit encoding instead of passing the path string
+    # directly to pandas — this bypasses the Windows codec/path issue
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        final_df.to_csv(f, index=False)
 
     total_rows = len(final_df)
     print(f"Success! Saved {total_rows} chronological ticks to {output_path}.")
