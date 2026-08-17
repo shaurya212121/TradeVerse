@@ -1,9 +1,10 @@
 import zmq
 import sys
 import re
+import time
 
 # ── Portfolio integration ────────────────────────────────────────────────────
-from portfolio import setup_db, register_client, record_trade, get_portfolio
+from portfolio import setup_db, register_client, record_trade, get_portfolio, get_holding_qty
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -18,8 +19,6 @@ def parse_price_from_response(response: str) -> float | None:
     if match:
         return float(match.group(1))
     return None
-
-
 def handle_trade_response(client_id: str, command: str, response: str) -> None:
     """
     If the server confirms a BUY or SELL, mirror it into the local SQLite portfolio.
@@ -68,7 +67,6 @@ def main():
     socket.setsockopt(zmq.RCVTIMEO, 8000)          # 8 s timeout — never hang
     socket.connect("tcp://localhost:5556")
     print("Connected! System ready for trading.\n")
-
     print("=" * 64)
     print("  TRADEVERSE — COMMAND REFERENCE")
     print("=" * 64)
@@ -110,12 +108,29 @@ def main():
                 print(get_portfolio(client_id))
                 continue
 
+            # ── Short-sell guard: block sells that exceed holdings ─────────
+            parts = command.strip().split(":")
+            if len(parts) >= 3 and parts[0].upper() == "SELL":
+                sell_ticker = parts[1].upper()
+                try:
+                    sell_qty = int(parts[2])
+                except ValueError:
+                    sell_qty = 0
+                owned = get_holding_qty(client_id, sell_ticker)
+                if sell_qty > owned:
+                    print(f"\n[REJECTED] You own {owned} shares of {sell_ticker} "
+                          f"but tried to sell {sell_qty}. Short selling is not allowed.\n")
+                    continue
+
             # ── Send command to C++ backend via ZeroMQ ────────────────────────
+            start_time = time.perf_counter()
             socket.send_string(command)
 
             try:
                 response = socket.recv_string()
-                print(f"\n[Server Response]:\n{response}\n")
+                end_time = time.perf_counter()
+                rtt_ms = (end_time - start_time) * 1000
+                print(f"\n[Server Response] (Total RTT: {rtt_ms:.2f} ms):\n{response}\n")
 
                 # Mirror confirmed BUY / SELL into local SQLite portfolio
                 action = command.split(":")[0].upper()

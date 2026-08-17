@@ -136,6 +136,8 @@ void chatbox_worker_routine(zmq::context_t* context) {
         auto result = worker.recv(request, zmq::recv_flags::none);
         if (!result) continue;
 
+        auto exec_start = std::chrono::high_resolution_clock::now();
+
         std::string client_msg(static_cast<char*>(request.data()), request.size());
         client_msg = trim(client_msg);
         std::string reply_msg;
@@ -228,6 +230,10 @@ void chatbox_worker_routine(zmq::context_t* context) {
         } catch (...) {
             reply_msg = "ERROR | Unknown server exception.";
         }
+
+        auto exec_end = std::chrono::high_resolution_clock::now();
+        auto exec_us = std::chrono::duration_cast<std::chrono::microseconds>(exec_end - exec_start).count();
+        reply_msg += "\n[LATENCY] Server Execution: " + std::to_string(exec_us) + " us";
 
         zmq::message_t reply(reply_msg.size());
         memcpy(reply.data(), reply_msg.data(), reply_msg.size());
