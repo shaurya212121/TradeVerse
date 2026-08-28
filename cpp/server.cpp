@@ -316,6 +316,7 @@ int main() {
     for (const auto& [ticker, info] : live_market_prices) {
         std::thread(ticker_processor_thread, ticker).detach();
     }
+    std::thread wal_writer(async_wal_writer_thread); wal_writer.detach();
     std::thread flush_worker(async_flush_thread); flush_worker.detach();
     std::thread sim_worker(price_simulator_thread); sim_worker.detach();
     std::thread proxy_worker(run_chatbox_proxy_server); proxy_worker.detach();
