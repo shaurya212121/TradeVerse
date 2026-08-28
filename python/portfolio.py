@@ -47,10 +47,8 @@ def register_client(client_id):
    conn.close()
    print(f"client '{client_id}' registered!")
 
-
 def record_trade(client_id,action,ticker,quantity,price):
    conn=sqlite3.connect("tradeverse.db")
-   
    # --- Auto-Registration (Option 2) ---
    # Ensure the client exists before processing their trade. 
    # If they don't exist, they are created with the default $100,000 cash balance.
@@ -58,10 +56,8 @@ def record_trade(client_id,action,ticker,quantity,price):
     INSERT OR IGNORE INTO CLIENTS(client_id, cash)
     VALUES(?, 100000.0)
    """, (client_id,))
-
    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
    total=quantity*price
-
    if(action=="BUY"):
       conn.execute("""
       UPDATE CLIENTS SET cash = cash - ?

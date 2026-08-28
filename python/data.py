@@ -45,7 +45,6 @@ for ticker in stocks:
 # Combine, Sort, and Save to data/ directory
 if all_data:
     print("\nMerging and structuring data for the C++ Exchange Server...")
-
     final_df = pd.concat(all_data, ignore_index=True)
     final_df = final_df.sort_values(by="TIMESTAMP")
 
@@ -54,9 +53,7 @@ if all_data:
     project_root = os.path.abspath(os.path.join(script_dir, ".."))
     data_dir = os.path.join(project_root, "data")
     output_path = os.path.join(data_dir, "market_data1.csv")
-
     os.makedirs(data_dir, exist_ok=True)
-
     # Write via open() with explicit encoding instead of passing the path string
     # directly to pandas — this bypasses the Windows codec/path issue
     with open(output_path, "w", newline="", encoding="utf-8") as f:
