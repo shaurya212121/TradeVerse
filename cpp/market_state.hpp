@@ -3,12 +3,14 @@
 #include <unordered_map>
 #include <mutex>
 #include <deque>
+#include <queue>
 #include <atomic>
 #include <fstream>
 #include <iostream>
 #include <thread>
 #include <random>
 #include <algorithm>
+#include <condition_variable>
 #include "utils.hpp"
 
 // ============================================================================
@@ -68,18 +70,98 @@ const std::unordered_map<std::string, double> TICKER_VOLATILITY = {
 };
 
 // ============================================================================
-//  LOGGING & FLUSHING
+//  ASYNC WAL QUEUE — disk writes happen off the hot path
 // ============================================================================
 
+struct WalEntry {
+    std::string action;
+    std::string ticker;
+    int qty;
+    double price;
+    std::string timestamp;
+    TradeRecord trade_record;   // also carries the history entry
+    bool has_trade_record;      // false for WAL-only entries
+};
+
+inline std::queue<WalEntry>  wal_queue;
+inline std::mutex            wal_queue_lock;
+inline std::condition_variable wal_queue_cv;
+
+// ---------- non-blocking push (called from trade threads) ----------
 inline void wal_log(const std::string& action, const std::string& ticker, int qty, double price) {
-    std::ofstream wal(WAL_FILE, std::ios::app);
-    if (!wal.is_open()) return;
-    wal << action << "|" << ticker << "|" << qty << "|"
-        << std::fixed << std::setprecision(2) << price << "|"
-        << get_timestamp() << "\n";
-    wal.flush();
+    WalEntry entry;
+    entry.action   = action;
+    entry.ticker   = ticker;
+    entry.qty      = qty;
+    entry.price    = price;
+    entry.timestamp = get_timestamp();
+    entry.has_trade_record = false;
+    {
+        std::lock_guard<std::mutex> lk(wal_queue_lock);
+        wal_queue.push(std::move(entry));
+    }
+    wal_queue_cv.notify_one();
 }
 
+// Overload: push WAL + trade-history entry in one shot
+inline void wal_log_with_history(const std::string& action, const std::string& ticker,
+                                 int qty, double price, const TradeRecord& rec) {
+    WalEntry entry;
+    entry.action   = action;
+    entry.ticker   = ticker;
+    entry.qty      = qty;
+    entry.price    = price;
+    entry.timestamp = get_timestamp();
+    entry.trade_record = rec;
+    entry.has_trade_record = true;
+    {
+        std::lock_guard<std::mutex> lk(wal_queue_lock);
+        wal_queue.push(std::move(entry));
+    }
+    wal_queue_cv.notify_one();
+}
+
+// ---------- background writer thread ----------
+inline void async_wal_writer_thread() {
+    std::cout << "[INIT] Async WAL writer thread started." << std::endl;
+    while (true) {
+        WalEntry entry;
+        {
+            std::unique_lock<std::mutex> ul(wal_queue_lock);
+            wal_queue_cv.wait(ul, []{ return !wal_queue.empty(); });
+            entry = std::move(wal_queue.front());
+            wal_queue.pop();
+        }
+
+        // --- WAL write (skip for history-only entries) ---
+        if (!entry.action.empty()) {
+            std::ofstream wal(WAL_FILE, std::ios::app);
+            if (wal.is_open()) {
+                wal << entry.action << "|" << entry.ticker << "|" << entry.qty << "|"
+                    << std::fixed << std::setprecision(2) << entry.price << "|"
+                    << entry.timestamp << "\n";
+                // wal.flush();  // let OS buffer — background thread, no durability guarantee needed
+            }
+        }
+
+        // --- Trade history write (if attached) ---
+        if (entry.has_trade_record) {
+            const auto& t = entry.trade_record;
+            std::ofstream hist(HISTORY_FILE, std::ios::app);
+            if (hist.is_open()) {
+                hist << t.trade_id << "|" << t.action << "|" << t.ticker << "|"
+                     << t.qty << "|" << std::fixed << std::setprecision(2) << t.price << "|"
+                     << t.timestamp << "|" << (t.cancelled ? "CANCELLED" : "EXECUTED") << "\n";
+                // hist.flush();
+            }
+            std::lock_guard<std::mutex> lk(history_lock);
+            trade_history.push_back(t);
+            if (trade_history.size() > MAX_HISTORY_SIZE) trade_history.pop_front();
+        }
+    }
+}
+
+// ---------- replay (runs once at startup, before threads) ----------
 inline void replay_wal() {
     std::ifstream wal(WAL_FILE);
     if (!wal.is_open()) return; 
@@ -111,17 +193,23 @@ inline void replay_wal() {
     if (replayed > 0) std::cout << "[WAL REPLAY] Recovered " << replayed << " pending trades." << std::endl;
 }
 
+// ---------- legacy sync helper (still used by cancel path) ----------
 inline void log_trade_history(const TradeRecord& trade) {
-    std::ofstream hist(HISTORY_FILE, std::ios::app);
-    if (hist.is_open()) {
-        hist << trade.trade_id << "|" << trade.action << "|" << trade.ticker << "|"
-             << trade.qty << "|" << std::fixed << std::setprecision(2) << trade.price << "|"
-             << trade.timestamp << "|" << (trade.cancelled ? "CANCELLED" : "EXECUTED") << "\n";
-        hist.flush();
+    // Push to async queue so it gets written in the background
+    WalEntry entry;
+    entry.action = trade.action;
+    entry.ticker = trade.ticker;
+    entry.qty = trade.qty;
+    entry.price = trade.price;
+    entry.timestamp = trade.timestamp;
+    entry.trade_record = trade;
+    entry.has_trade_record = true;
+    entry.action = "";  // no WAL line needed for history-only entries
+    {
+        std::lock_guard<std::mutex> lk(wal_queue_lock);
+        wal_queue.push(std::move(entry));
     }
-    std::lock_guard<std::mutex> lock(history_lock);
-    trade_history.push_back(trade);
-    if (trade_history.size() > MAX_HISTORY_SIZE) trade_history.pop_front();
+    wal_queue_cv.notify_one();
 }
 
 inline void sync_to_csv() {

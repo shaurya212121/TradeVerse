@@ -19,19 +19,21 @@ if 'zmq_socket' not in st.session_state:
     st.session_state.price_history = [] 
 
 # 3. Quickly grab any new prices from the C++ server without freezing
-try:
-    message = st.session_state.zmq_socket.recv_string(flags=zmq.DONTWAIT)
-    # CHANGED: Message from C++ actually looks like "AAPL,$341.50"
-    parts = message.split(",$")
-    ticker = parts[0]
-    price = float(parts[1])
-    
-    st.session_state.price_history.append({"Ticker": ticker, "Price": price})
-    
-    if len(st.session_state.price_history) > 100:
-        st.session_state.price_history.pop(0)
-except zmq.Again:
-    pass
+while True:
+    try:
+        message = st.session_state.zmq_socket.recv_string(flags=zmq.DONTWAIT)
+        # CHANGED: Message from C++ actually looks like "AAPL,$341.50"
+        parts = message.split(",$")
+        if len(parts) == 2:
+            ticker = parts[0]
+            price = float(parts[1])
+            
+            st.session_state.price_history.append({"Ticker": ticker, "Price": price})
+    except zmq.Again:
+        break
+
+if len(st.session_state.price_history) > 500:
+    st.session_state.price_history = st.session_state.price_history[-500:]
 
 # 4. SPLIT SCREEN INTO TWO COLUMNS
 col1, col2 = st.columns(2)

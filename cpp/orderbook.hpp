@@ -68,12 +68,10 @@ inline void register_order_id(int oid, const std::string& ticker) {
     std::lock_guard<std::mutex> lk(order_ticker_map_lock);
     order_ticker_map[oid] = ticker;
 }
-
 inline void unregister_order_id(int oid) {
     std::lock_guard<std::mutex> lk(order_ticker_map_lock);
     order_ticker_map.erase(oid);
 }
-
 // ============================================================================
 //  SEED ORDER BOOK  (called once per ticker at startup, before threads start)
 // ============================================================================
@@ -132,17 +130,14 @@ inline std::pair<double, double> get_best_bid_ask(const std::string& ticker) {
     if (!book.asks.empty()) best_ask = book.asks.begin()->first;
     return {best_bid, best_ask};
 }
-
 inline std::string get_orderbook_display(const std::string& ticker, int depth = ORDERBOOK_DISPLAY_DEPTH) {
     if (!shards.count(ticker))
         return "ERROR | No order book found for '" + ticker + "'.";
-
     std::lock_guard<std::mutex> bk(shards[ticker].book_lock);
     const auto& book = order_books[ticker];
     std::ostringstream oss;
     oss << "ORDERBOOK | " << ticker << "\n" << std::string(48, '=') << "\n";
     oss << "         ASKS (Sellers)\n  " << std::string(38, '-') << "\n";
-
     std::vector<std::pair<double, int>> ask_levels;
     for (const auto& [price, orders] : book.asks) {
         int lq = 0; for (const auto& o : orders) lq += o.qty;
@@ -152,7 +147,6 @@ inline std::string get_orderbook_display(const std::string& ticker, int depth = 
     for (int i = (int)ask_levels.size() - 1; i >= 0; --i)
         oss << "   $" << std::fixed << std::setprecision(2) << std::setw(10)
             << ask_levels[i].first << "     x " << std::setw(6) << ask_levels[i].second << "\n";
-
     double best_bid = book.bids.empty() ? 0.0 : book.bids.begin()->first;
     double best_ask = book.asks.empty() ? 0.0 : book.asks.begin()->first;
     double spread   = (best_ask > 0 && best_bid > 0) ? (best_ask - best_bid) : 0.0;
@@ -168,20 +162,16 @@ inline std::string get_orderbook_display(const std::string& ticker, int depth = 
     oss << "  " << std::string(38, '-') << "\n         BIDS (Buyers)\n" << std::string(48, '=') << "\n";
     return oss.str();
 }
-
 // ============================================================================
 //  PROCESS LIMIT ORDER  (called from each ticker's own processor thread)
 //  Acquires only this ticker's book_lock — other tickers run in parallel.
 // ============================================================================
-
 inline std::string process_limit_order(const std::string& side, const std::string& ticker, int qty, double price) {
     if (!shards.count(ticker)) return "REJECTED | No order book for '" + ticker + "'.";
-
     int new_oid   = 0;
     int original  = qty, filled = 0;
     double fill_val = 0.0;
     std::string ts = get_timestamp();
-
     {
         std::lock_guard<std::mutex> bk(shards[ticker].book_lock);
         OrderBook& book = order_books[ticker];

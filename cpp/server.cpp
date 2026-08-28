@@ -5,15 +5,12 @@
 #include "utils.hpp"
 #include "market_state.hpp"
 #include "orderbook.hpp"
-
 // ============================================================================
 //  PORTFOLIO / STATUS helpers (defined here — after both headers are included)
 // ============================================================================
-
 std::string get_portfolio_display() {
     std::lock_guard<std::mutex> lock(market_lock);
     if (live_market_prices.empty()) return "ERROR | No market data loaded.";
-
     std::ostringstream oss;
     oss << "PORTFOLIO\n" << std::string(72, '=') << "\n";
     oss << std::left
@@ -23,7 +20,6 @@ std::string get_portfolio_display() {
         << std::setw(14) << "BEST BID"
         << std::setw(14) << "BEST ASK"
         << "\n" << std::string(72, '-') << "\n";
-
     for (const auto& [ticker, info] : live_market_prices) {
         // get_best_bid_ask locks this ticker's own book_lock internally
         auto [best_bid, best_ask] = get_best_bid_ask(ticker);
@@ -38,7 +34,6 @@ std::string get_portfolio_display() {
     oss << std::string(72, '=');
     return oss.str();
 }
-
 std::string get_status_display() {
     std::lock_guard<std::mutex> mlock(market_lock);
     std::lock_guard<std::mutex> hlock(history_lock);
@@ -55,26 +50,21 @@ std::string get_status_display() {
     oss << std::string(40, '=') << "\n  Server is HEALTHY";
     return oss.str();
 }
-
 // ============================================================================
 //  TRADE EXECUTION (MARKET ORDERS)
 // ============================================================================
-
 std::string execute_trade(const std::string& action, const std::string& ticker, int qty) {
     std::lock_guard<std::mutex> lock(market_lock);
 
     if (live_market_prices.find(ticker) == live_market_prices.end()) {
         return "REJECTED | Asset '" + ticker + "' not found.";
     }
-
     StockInfo& stock = live_market_prices[ticker];
     std::string ts = get_timestamp();
     int tid = next_trade_id.fetch_add(1);
-
     if (action == "BUY") {
         int buyable = get_buyable_qty(ticker);
         if (buyable < qty) return "REJECTED | Insufficient ask-side liquidity!";
-
         if (stock.volume >= qty) {
             stock.volume -= qty;
             wal_log("BUY", ticker, qty, stock.price);
@@ -87,7 +77,6 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
     } else if (action == "SELL") {
         int sellable = get_sellable_qty(ticker);
         if (sellable < qty) return "REJECTED | Insufficient bid-side liquidity!";
-
         stock.volume += qty;
         wal_log("SELL", ticker, qty, stock.price);
         dirty_flag.store(true);
@@ -101,7 +90,6 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
 // ============================================================================
 //  CANCEL MARKET ORDER (mark as cancelled in history)
 // ============================================================================
-
 std::string cancel_trade(int trade_id) {
     std::lock_guard<std::mutex> lock(history_lock);
     for (auto& t : trade_history) {
@@ -122,19 +110,18 @@ std::string cancel_trade(int trade_id) {
     }
     return "REJECTED | Trade #" + std::to_string(trade_id) + " not found.";
 }
-
 // ============================================================================
 //  WORKER THREAD — HANDLES ALL CLIENT COMMANDS
 // ============================================================================
-
 void chatbox_worker_routine(zmq::context_t* context) {
     zmq::socket_t worker(*context, zmq::socket_type::rep);
     worker.connect("inproc://backend");
-
     while (true) {
         zmq::message_t request;
         auto result = worker.recv(request, zmq::recv_flags::none);
         if (!result) continue;
+
+        auto exec_start = std::chrono::high_resolution_clock::now();
 
         std::string client_msg(static_cast<char*>(request.data()), request.size());
         client_msg = trim(client_msg);
@@ -228,6 +215,10 @@ void chatbox_worker_routine(zmq::context_t* context) {
         } catch (...) {
             reply_msg = "ERROR | Unknown server exception.";
         }
+
+        auto exec_end = std::chrono::high_resolution_clock::now();
+        auto exec_us = std::chrono::duration_cast<std::chrono::microseconds>(exec_end - exec_start).count();
+        reply_msg += "\n[LATENCY] Server Execution: " + std::to_string(exec_us) + " us";
 
         zmq::message_t reply(reply_msg.size());
         memcpy(reply.data(), reply_msg.data(), reply_msg.size());
@@ -325,6 +316,7 @@ int main() {
     for (const auto& [ticker, info] : live_market_prices) {
         std::thread(ticker_processor_thread, ticker).detach();
     }
+    std::thread wal_writer(async_wal_writer_thread); wal_writer.detach();
     std::thread flush_worker(async_flush_thread); flush_worker.detach();
     std::thread sim_worker(price_simulator_thread); sim_worker.detach();
     std::thread proxy_worker(run_chatbox_proxy_server); proxy_worker.detach();
