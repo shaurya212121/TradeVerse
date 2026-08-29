@@ -46,8 +46,8 @@ def calculate_percentile(data, percentile):
 
 if __name__ == "__main__":
     # --- CONFIGURE YOUR TEST HERE ---
-    NUM_BOTS = 20            # Number of simultaneous traders
-    REQUESTS_PER_BOT = 5000  # How many trades each bot makes
+    NUM_BOTS = 50            # Number of simultaneous traders
+    REQUESTS_PER_BOT = 10000  # How many trades each bot makes
     TARGET_IP = "localhost" # Change this to your friend's Tailscale IP when testing over the internet!
     # --------------------------------
     

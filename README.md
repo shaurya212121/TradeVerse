@@ -25,15 +25,15 @@
 
 ## 🧭 Overview
 
-**TradeVerse** is a distributed trading engine that simulates a real-world electronic exchange. It pairs a low-latency C++17 backend (order matching, WAL persistence, live price simulation) with Python client interfaces for trade execution and real-time market data streaming — all communicating over ZeroMQ sockets.
+**TradeVerse** is a concurrent, multithreaded trading engine that simulates a real-world electronic exchange. It pairs a low-latency C++17 backend (order matching, WAL persistence, live price simulation) with Python client interfaces for trade execution and real-time market data streaming — all communicating over ZeroMQ sockets.
 
 ### Why TradeVerse?
 
 | Challenge | TradeVerse's Approach |
 |---|---|
 | Order matching under concurrency | Thread-safe FIFO queue → single-threaded matcher (zero race conditions) |
-| Write latency at scale | WAL append-only log (μs writes) + async CSV flush every 5s |
-| Crash recovery | Automatic WAL replay on startup restores all pending state |
+| Write latency at scale | Async WAL queue — disk writes happen off the hot path via a background thread |
+| Crash recovery | WAL replay on startup restores volume deltas (market trades) |
 | Realistic simulation | Per-ticker GBM price model with mean-reversion and configurable volatility |
 | Client flexibility | ZeroMQ PUB/SUB for streaming, REQ/REP for trade execution |
 
@@ -138,16 +138,19 @@ You should see ticker count, order book stats, and a `Server is HEALTHY` message
 
 ### Concurrency Model
 
-The server runs **5 concurrent subsystems**, each on its own thread:
+The server runs **6+ concurrent subsystems**:
 
 | Thread | Role | Details |
 |---|---|---|
 | **Main** | PUB broadcaster | Publishes all ticker prices every 1s on port `5555` |
 | **Proxy** | ROUTER-DEALER proxy | Binds port `5556`, distributes requests across workers |
 | **Workers (×10)** | Command handlers | Parse and execute client commands concurrently |
-| **Queue Processor** | Order matching | Drains FIFO queue sequentially — guarantees deterministic fills |
+| **Per-Ticker Processors (×10)** | Order matching | One thread per ticker — AAPL and TSLA process in parallel |
+| **WAL Writer** | Async disk I/O | Drains an in-memory queue and writes WAL + history to disk |
 | **Flush** | WAL → CSV sync | Writes dirty state to CSV every 5 seconds |
 | **Simulator** | Price engine | Updates all ticker prices every 500ms using stochastic model |
+
+> **Note on parallelism:** Limit orders are fully parallel across tickers (each ticker has its own shard, queue, and book lock). Market orders and price updates currently serialize on a global `market_lock` — this is a known limitation documented below.
 
 ---
 
@@ -169,17 +172,19 @@ The server runs **5 concurrent subsystems**, each on its own thread:
 - Seeded at startup with 8 synthetic levels on each side for immediate liquidity
 - Spread, depth, and best bid/ask visible via `ORDERBOOK:<TICKER>` command
 
-### 📝 Write-Ahead Log (WAL)
+### 📝 Write-Ahead Log (WAL) with Async Queue
 
 ```
-BEFORE:  Trade → Lock → Modify RAM → REWRITE ENTIRE CSV → Unlock → Reply
-AFTER:   Trade → Lock → Modify RAM → Append 1 WAL line → Unlock → Reply  (μs)
-                  └── Background thread flushes CSV every 5 seconds
+BEFORE (v1):  Trade → Lock → math → open file → write → flush → Unlock → Reply  (~15ms)
+AFTER  (v2):  Trade → Lock → math → push to queue → Unlock → Reply  (~0.001ms)
+                                      └── Background WAL writer thread drains queue → disk
+                                      └── Separate flush thread syncs CSV every 5 seconds
 ```
 
-- **Append-only** — each trade appends a single pipe-delimited line to `logs/wal.log`
-- **Async flush** — a dedicated thread syncs state to `data/market_data1.csv` every 5s
-- **Crash recovery** — on restart, WAL replays all uncommitted trades to restore state
+- **Non-blocking** — trade threads push a `WalEntry` struct to an in-memory queue and return immediately
+- **Background writer** — a dedicated `async_wal_writer_thread` drains the queue using a condition variable and writes to `logs/wal.log`
+- **Async flush** — a separate thread syncs state to `data/market_data1.csv` every 5s
+- **Crash recovery** — on restart, WAL replays volume deltas for market trades (note: resting limit orders are re-seeded, not recovered)
 - **Audit trail** — permanent history logged to `logs/trade_history.log`
 
 ### 📈 Price Simulation Engine
@@ -413,16 +418,48 @@ STATUS_CHECK | TradeVerse Server
 
 ---
 
+## 📊 Benchmark Results
+
+Stress test run with `python/stress_test.py` (50 concurrent bots, 1000 orders each):
+
+| Metric | Value |
+|---|---|
+| **Total Orders Executed** | 50,000 / 50,000 |
+| **Time Taken** | 5.72 seconds |
+| **Throughput** | **8,741 orders/sec** |
+| **Average Latency** | 2.44 ms |
+| **p50 (Median)** | 1.26 ms |
+| **p95** | 10.66 ms |
+| **p99** | 23.19 ms |
+
+> Measured on Windows with the async WAL queue enabled. Before the async WAL refactor, synchronous disk writes on every trade were the bottleneck (~15ms per trade for file open + write + flush). Moving WAL persistence to a background thread removed disk I/O from the critical path.
+
+---
+
+## ⚠️ Known Limitations
+
+| Area | Detail |
+|---|---|
+| **Global `market_lock`** | Market orders, the price simulator, and the PUB broadcast loop all serialize on one mutex. Limit orders are parallel per-ticker, but market orders are not. |
+| **WAL recovery is partial** | `replay_wal()` restores volume deltas for market trades only. Resting limit orders are not persisted — on restart, `seed_orderbook()` generates fresh synthetic depth. |
+| **No server-side risk checks** | The C++ engine has no concept of client ownership or cash balance. A client can sell shares it never bought. Enforcement lives in the Python client layer (`portfolio.py`). |
+| **Market orders don't walk the book** | `execute_trade()` fills the entire quantity at the current snapshot price. Unlike `process_limit_order()`, it does not consume price levels or calculate VWAP. |
+| **No idempotency** | If a trade executes but the ZMQ reply is lost, the client may retry and double-execute. No request IDs or deduplication exist. |
+| **WAL has no checksums** | A crash mid-write could produce a truncated line in `wal.log`. `replay_wal()` silently skips malformed lines. |
+| **Magic numbers** | Thread counts, ports, tick intervals, and flush intervals are hardcoded constants, not configurable via environment or config file. |
+
+---
+
 ## 🗺️ Roadmap
 
-- [ ] Cross-platform support (Linux / macOS build targets)
+- [x] ~~Cross-platform support (Linux / macOS build targets)~~ — Makefile now detects OS
 - [ ] WebSocket gateway for browser-based trading UI
 - [ ] REST API layer alongside ZeroMQ
 - [ ] Persistent order book state across restarts
 - [ ] Multi-user authentication and session management
 - [ ] Historical OHLCV candle aggregation
 - [ ] Risk management module (position limits, margin checks)
-- [ ] Performance metrics dashboard (latency histograms, throughput)
+- [x] ~~Performance metrics dashboard (latency histograms, throughput)~~ — stress_test.py
 
 ---
 

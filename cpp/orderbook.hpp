@@ -121,6 +121,26 @@ inline int get_sellable_qty(const std::string& ticker) {
     return total;
 }
 
+// ============================================================================
+//  LOCK-FREE READ HELPERS — caller MUST already hold shard.book_lock
+//  These exist to avoid deadlock when execute_trade() grabs book_lock
+//  and then needs to check liquidity.
+// ============================================================================
+
+inline int get_buyable_qty_unsafe(const std::string& ticker) {
+    int total = 0;
+    for (const auto& [p, orders] : order_books[ticker].asks)
+        for (const auto& o : orders) total += o.qty;
+    return total;
+}
+
+inline int get_sellable_qty_unsafe(const std::string& ticker) {
+    int total = 0;
+    for (const auto& [p, orders] : order_books[ticker].bids)
+        for (const auto& o : orders) total += o.qty;
+    return total;
+}
+
 inline std::pair<double, double> get_best_bid_ask(const std::string& ticker) {
     double best_bid = 0.0, best_ask = 0.0;
     if (!shards.count(ticker)) return {best_bid, best_ask};

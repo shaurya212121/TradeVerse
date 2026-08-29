@@ -52,39 +52,56 @@ std::string get_status_display() {
 }
 // ============================================================================
 //  TRADE EXECUTION (MARKET ORDERS)
+//  FIX 4: Per-ticker sharding — uses shard.book_lock instead of global
+//  market_lock. BUY AAPL and BUY TSLA now execute fully in parallel.
+//  Uses _unsafe helpers to avoid deadlock (we already hold book_lock).
 // ============================================================================
 std::string execute_trade(const std::string& action, const std::string& ticker, int qty) {
-    std::lock_guard<std::mutex> lock(market_lock);
-
-    if (live_market_prices.find(ticker) == live_market_prices.end()) {
-        return "REJECTED | Asset '" + ticker + "' not found.";
+    // Quick check under market_lock — just to verify the ticker exists
+    {
+        std::lock_guard<std::mutex> lock(market_lock);
+        if (live_market_prices.find(ticker) == live_market_prices.end()) {
+            return "REJECTED | Asset '" + ticker + "' not found.";
+        }
     }
 
-    StockInfo& stock = live_market_prices[ticker];
+    if (!shards.count(ticker)) return "REJECTED | No shard for '" + ticker + "'.";
+
+    // Lock ONLY this ticker's shard — other tickers proceed in parallel
+    auto& shard = shards[ticker];
+    std::lock_guard<std::mutex> bk(shard.book_lock);
+
     std::string ts = get_timestamp();
     int tid = next_trade_id.fetch_add(1);
 
+    // Now briefly grab market_lock to read/write StockInfo (price & volume)
     if (action == "BUY") {
-        int buyable = get_buyable_qty(ticker);
+        int buyable = get_buyable_qty_unsafe(ticker);  // no second lock — no deadlock!
         if (buyable < qty) return "REJECTED | Insufficient ask-side liquidity!";
 
+        std::lock_guard<std::mutex> mlock(market_lock);
+        StockInfo& stock = live_market_prices[ticker];
         if (stock.volume >= qty) {
             stock.volume -= qty;
-            wal_log_with_history("BUY", ticker, qty, stock.price, {tid, "BUY", ticker, qty, stock.price, ts, false});
+            double price = stock.price;
+            wal_log_with_history("BUY", ticker, qty, price, {tid, "BUY", ticker, qty, price, ts, false});
             dirty_flag.store(true);
             return "SUCCESS | Bought " + std::to_string(qty) + " " + ticker +
-                   " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << stock.price; return o.str(); }();
+                   " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << price; return o.str(); }();
         }
         return "REJECTED | Insufficient volume.";
     } else if (action == "SELL") {
-        int sellable = get_sellable_qty(ticker);
+        int sellable = get_sellable_qty_unsafe(ticker);  // no second lock — no deadlock!
         if (sellable < qty) return "REJECTED | Insufficient bid-side liquidity!";
 
+        std::lock_guard<std::mutex> mlock(market_lock);
+        StockInfo& stock = live_market_prices[ticker];
         stock.volume += qty;
-        wal_log_with_history("SELL", ticker, qty, stock.price, {tid, "SELL", ticker, qty, stock.price, ts, false});
+        double price = stock.price;
+        wal_log_with_history("SELL", ticker, qty, price, {tid, "SELL", ticker, qty, price, ts, false});
         dirty_flag.store(true);
         return "SUCCESS | Sold " + std::to_string(qty) + " " + ticker +
-               " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << stock.price; return o.str(); }();
+               " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << price; return o.str(); }();
     }
     return "REJECTED | Invalid action.";
 }
