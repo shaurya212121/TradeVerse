@@ -59,17 +59,19 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
     if (live_market_prices.find(ticker) == live_market_prices.end()) {
         return "REJECTED | Asset '" + ticker + "' not found.";
     }
+
     StockInfo& stock = live_market_prices[ticker];
     std::string ts = get_timestamp();
     int tid = next_trade_id.fetch_add(1);
+
     if (action == "BUY") {
         int buyable = get_buyable_qty(ticker);
         if (buyable < qty) return "REJECTED | Insufficient ask-side liquidity!";
+
         if (stock.volume >= qty) {
             stock.volume -= qty;
-            wal_log("BUY", ticker, qty, stock.price);
+            wal_log_with_history("BUY", ticker, qty, stock.price, {tid, "BUY", ticker, qty, stock.price, ts, false});
             dirty_flag.store(true);
-            log_trade_history({tid, "BUY", ticker, qty, stock.price, ts, false});
             return "SUCCESS | Bought " + std::to_string(qty) + " " + ticker +
                    " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << stock.price; return o.str(); }();
         }
@@ -77,10 +79,10 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
     } else if (action == "SELL") {
         int sellable = get_sellable_qty(ticker);
         if (sellable < qty) return "REJECTED | Insufficient bid-side liquidity!";
+
         stock.volume += qty;
-        wal_log("SELL", ticker, qty, stock.price);
+        wal_log_with_history("SELL", ticker, qty, stock.price, {tid, "SELL", ticker, qty, stock.price, ts, false});
         dirty_flag.store(true);
-        log_trade_history({tid, "SELL", ticker, qty, stock.price, ts, false});
         return "SUCCESS | Sold " + std::to_string(qty) + " " + ticker +
                " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << stock.price; return o.str(); }();
     }

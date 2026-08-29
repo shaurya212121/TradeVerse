@@ -124,6 +124,9 @@ inline void wal_log_with_history(const std::string& action, const std::string& t
 // ---------- background writer thread ----------
 inline void async_wal_writer_thread() {
     std::cout << "[INIT] Async WAL writer thread started." << std::endl;
+    static std::ofstream wal(WAL_FILE, std::ios::app);
+    static std::ofstream hist(HISTORY_FILE, std::ios::app);
+    
     while (true) {
         WalEntry entry;
         {
@@ -135,24 +138,20 @@ inline void async_wal_writer_thread() {
 
         // --- WAL write (skip for history-only entries) ---
         if (!entry.action.empty()) {
-            std::ofstream wal(WAL_FILE, std::ios::app);
             if (wal.is_open()) {
                 wal << entry.action << "|" << entry.ticker << "|" << entry.qty << "|"
                     << std::fixed << std::setprecision(2) << entry.price << "|"
                     << entry.timestamp << "\n";
-                // wal.flush();  // let OS buffer — background thread, no durability guarantee needed
             }
         }
 
         // --- Trade history write (if attached) ---
         if (entry.has_trade_record) {
             const auto& t = entry.trade_record;
-            std::ofstream hist(HISTORY_FILE, std::ios::app);
             if (hist.is_open()) {
                 hist << t.trade_id << "|" << t.action << "|" << t.ticker << "|"
                      << t.qty << "|" << std::fixed << std::setprecision(2) << t.price << "|"
                      << t.timestamp << "|" << (t.cancelled ? "CANCELLED" : "EXECUTED") << "\n";
-                // hist.flush();
             }
             std::lock_guard<std::mutex> lk(history_lock);
             trade_history.push_back(t);
