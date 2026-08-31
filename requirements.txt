@@ -1,6 +1,5 @@
-streamlit
-plotly-express
-pyzmq
-numpy
-yfinance
-pandas
+pyzmq==25.1.2
+streamlit==1.32.0
+pandas==2.2.1
+plotly==5.20.0
+yfinance==0.2.37
