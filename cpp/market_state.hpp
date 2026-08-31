@@ -56,17 +56,20 @@ const int FLUSH_INTERVAL_SEC = 5;
 const size_t MAX_HISTORY_SIZE = 500;
 const int PRICE_TICK_MS = 500;
 
+// Volatility reduced 10x — bot order-book matching now drives price discovery.
+// The simulator only adds tiny microstructure noise to keep the chart alive
+// when no bots are active; actual trades dominate price movement.
 const std::unordered_map<std::string, double> TICKER_VOLATILITY = {
-    {"AAPL",        0.0012},
-    {"TSLA",        0.0030},
-    {"TCS.NS",      0.0010},
-    {"RELIANCE.NS", 0.0015},
-    {"HDFCBANK.NS", 0.0008},
-    {"GOOGL",       0.0014},
-    {"AMZN",        0.0018},
-    {"MSFT",        0.0010},
-    {"NVDA",        0.0035},
-    {"INFY.NS",     0.0009},
+    {"AAPL",        0.00012},
+    {"TSLA",        0.00030},
+    {"TCS.NS",      0.00010},
+    {"RELIANCE.NS", 0.00015},
+    {"HDFCBANK.NS", 0.00008},
+    {"GOOGL",       0.00014},
+    {"AMZN",        0.00018},
+    {"MSFT",        0.00010},
+    {"NVDA",        0.00035},
+    {"INFY.NS",     0.00009},
 };
 
 // ============================================================================

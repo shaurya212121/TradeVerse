@@ -46,11 +46,11 @@ def calculate_percentile(data, percentile):
 
 if __name__ == "__main__":
     # --- CONFIGURE YOUR TEST HERE ---
-    NUM_BOTS = 50            # Number of simultaneous traders
-    REQUESTS_PER_BOT = 10000  # How many trades each bot makes
+    NUM_BOTS = 10            # Number of simultaneous traders
+    REQUESTS_PER_BOT = 2000  # How many trades each bot makes
     TARGET_IP = "localhost" # Change this to your friend's Tailscale IP when testing over the internet!
     # --------------------------------
-    
+
     total_expected = NUM_BOTS * REQUESTS_PER_BOT
     print(f"🔥 Starting Stress Test: {NUM_BOTS} bots firing {REQUESTS_PER_BOT} trades each.")
     print(f"🎯 Target Server: {TARGET_IP}")

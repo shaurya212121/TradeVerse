@@ -9,8 +9,13 @@
 //  PORTFOLIO / STATUS helpers (defined here — after both headers are included)
 // ============================================================================
 std::string get_portfolio_display() {
-    std::lock_guard<std::mutex> lock(market_lock);
-    if (live_market_prices.empty()) return "ERROR | No market data loaded.";
+    std::vector<std::pair<std::string, StockInfo>> stocks;
+    {
+        std::lock_guard<std::mutex> lock(market_lock);
+        if (live_market_prices.empty()) return "ERROR | No market data loaded.";
+        for (const auto& kv : live_market_prices) stocks.push_back(kv);
+    }
+    
     std::ostringstream oss;
     oss << "PORTFOLIO\n" << std::string(72, '=') << "\n";
     oss << std::left
@@ -20,7 +25,7 @@ std::string get_portfolio_display() {
         << std::setw(14) << "BEST BID"
         << std::setw(14) << "BEST ASK"
         << "\n" << std::string(72, '-') << "\n";
-    for (const auto& [ticker, info] : live_market_prices) {
+    for (const auto& [ticker, info] : stocks) {
         // get_best_bid_ask locks this ticker's own book_lock internally
         auto [best_bid, best_ask] = get_best_bid_ask(ticker);
         oss << std::fixed << std::setprecision(2)
@@ -84,6 +89,8 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
         if (stock.volume >= qty) {
             stock.volume -= qty;
             double price = stock.price;
+            // Market buy impact: buying pressure ticks price up by $0.01
+            stock.price = std::round((stock.price + 0.01) * 100.0) / 100.0;
             wal_log_with_history("BUY", ticker, qty, price, {tid, "BUY", ticker, qty, price, ts, false});
             dirty_flag.store(true);
             return "SUCCESS | Bought " + std::to_string(qty) + " " + ticker +
@@ -98,6 +105,10 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
         StockInfo& stock = live_market_prices[ticker];
         stock.volume += qty;
         double price = stock.price;
+        // Market sell impact: selling pressure ticks price down by $0.01
+        // Floor: price cannot drop below 1% of the seed base price
+        double base = base_prices.count(ticker) ? base_prices.at(ticker) : stock.price;
+        stock.price = std::max(std::round((stock.price - 0.01) * 100.0) / 100.0, base * 0.01);
         wal_log_with_history("SELL", ticker, qty, price, {tid, "SELL", ticker, qty, price, ts, false});
         dirty_flag.store(true);
         return "SUCCESS | Sold " + std::to_string(qty) + " " + ticker +
@@ -193,15 +204,22 @@ void chatbox_worker_routine(zmq::context_t* context) {
         // ---- FETCH PRICE ----
         else if (client_msg.rfind("FETCH:", 0) == 0) {
             std::string target = trim(client_msg.substr(6));
-            std::lock_guard<std::mutex> lock(market_lock);
-            if (live_market_prices.count(target)) {
-                auto& info = live_market_prices[target];
+            StockInfo info_copy;
+            bool found = false;
+            {
+                std::lock_guard<std::mutex> lock(market_lock);
+                if (live_market_prices.count(target)) {
+                    info_copy = live_market_prices[target];
+                    found = true;
+                }
+            }
+            if (found) {
                 auto [bid, ask] = get_best_bid_ask(target);
                 std::ostringstream oss;
                 oss << std::fixed << std::setprecision(2);
                 oss << "SUCCESS | " << target
-                    << " | Price: $" << info.price
-                    << " | Volume: "  << info.volume
+                    << " | Price: $" << info_copy.price
+                    << " | Volume: " << info_copy.volume
                     << " | Bid: $"   << bid
                     << " | Ask: $"   << ask;
                 reply_msg = oss.str();

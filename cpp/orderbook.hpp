@@ -236,12 +236,24 @@ inline std::string process_limit_order(const std::string& side, const std::strin
     // Register resting order ID outside book_lock (safe — client doesn't have the ID yet)
     if (new_oid > 0) register_order_id(new_oid, ticker);
 
-    // Log filled portion
+    // Log filled portion + price discovery: executed fill price becomes the market price
     if (filled > 0) {
+        double avg_fill = fill_val / filled;
         std::string act = (side == "BID") ? "BUY" : "SELL";
-        wal_log(act, ticker, filled, fill_val / filled);
+        wal_log(act, ticker, filled, avg_fill);
         dirty_flag.store(true);
-        log_trade_history({next_trade_id.fetch_add(1), act, ticker, filled, fill_val / filled, ts, false});
+        log_trade_history({next_trade_id.fetch_add(1), act, ticker, filled, avg_fill, ts, false});
+        // ── PRICE DISCOVERY ──────────────────────────────────────────────────
+        // The price at which orders actually matched in the book is now the
+        // official market price. This is what gets broadcast to the dashboard
+        // via the publisher on port 5555 — bots now move prices, not the RNG.
+        {
+            std::lock_guard<std::mutex> mlock(market_lock);
+            if (live_market_prices.count(ticker)) {
+                live_market_prices[ticker].price     = avg_fill;
+                live_market_prices[ticker].timestamp = ts;
+            }
+        }
     }
 
     std::ostringstream oss;
