@@ -26,7 +26,7 @@ sleep 1
 # Step 3: Build the server
 echo "[3/4] Compiling server..."
 cd cpp
-g++ -std=c++17 -O3 -o server server.cpp -lzmq -lpthread
+g++ -std=c++17 -O3 -I/opt/homebrew/include -L/opt/homebrew/lib -I/usr/local/include -L/usr/local/lib -o server server.cpp -lzmq -lpthread
 if [ $? -ne 0 ]; then
     echo "[FATAL] Build failed. Fix compile errors and retry."
     exit 1
