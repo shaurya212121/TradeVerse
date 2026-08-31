@@ -1,46 +1,61 @@
 #!/bin/bash
 echo "========================================"
-echo " TradeVerse — One-Click Mac Startup"
+echo " TradeVerse — Ultimate Mac Auto-Setup"
 echo "========================================"
 echo ""
 
 # 1. Check for Homebrew
 if ! command -v brew &> /dev/null; then
-    echo "[FATAL] Homebrew is not installed on this Mac."
-    echo "Please run this command first to install it:"
+    echo "[FATAL] Homebrew is not installed! Paste this in your terminal first:"
     echo '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
     exit 1
 fi
 
-# 2. Automatically install C++ dependencies if missing
-echo "[SETUP] Checking Mac dependencies..."
-brew list zeromq &>/dev/null || brew install zeromq
-brew list cppzmq &>/dev/null || brew install cppzmq
+# 2. Check and Install Mac C++ Dependencies automatically
+echo "[SETUP] Checking system dependencies..."
+for pkg in zeromq cppzmq pkg-config; do
+    if ! brew list $pkg &>/dev/null; then
+        echo "[SETUP] Installing missing package: $pkg..."
+        brew install $pkg
+    fi
+done
 
-# 3. Ensure data folder exists
+# 3. Check and Install Python Dependencies automatically
+echo "[SETUP] Checking Python dependencies..."
+if ! python3 -c "import yfinance, pandas, zmq" &> /dev/null; then
+    echo "[SETUP] Missing Python packages. Installing them now..."
+    python3 -m pip install yfinance pandas pyzmq plotly streamlit --break-system-packages 2>/dev/null || python3 -m pip install yfinance pandas pyzmq plotly streamlit
+fi
+
+# 4. Create data directory
 mkdir -p data
 
-# 4. Fetch latest market data
+# 5. Fetch market data
 echo "[1/4] Syncing latest market data from Yahoo Finance..."
 python3 python/data.py
 if [ $? -ne 0 ]; then
-    echo "[WARNING] Data fetch failed. Checking for existing CSV..."
-    if [ ! -f "data/market_data1.csv" ]; then
-        echo "[FATAL] No market data available. Run 'python3 -m pip install --upgrade yfinance pandas' and try again."
-        exit 1
-    fi
+    echo "[FATAL] Data fetch failed. Please check your network or Yahoo Finance."
+    exit 1
 fi
 echo ""
 
-# 5. Kill any running server instance
+# 6. Kill running server
 echo "[2/4] Stopping any running server instance..."
 pkill -f "cpp/server" >/dev/null 2>&1
 sleep 1
 
-# 6. Build the server using dynamic Homebrew paths
+# 7. Compile C++ server
 echo "[3/4] Compiling C++ server for Mac..."
 cd cpp
-g++ -std=c++17 -O3 -I$(brew --prefix)/include -L$(brew --prefix)/lib -o server server.cpp -lzmq -lpthread
+
+# Get exact paths using pkg-config AND brew prefix to guarantee it finds zmq.hpp
+BREW_INC="$(brew --prefix)/include"
+BREW_LIB="$(brew --prefix)/lib"
+PKG_FLAGS=$(pkg-config --cflags --libs libzmq 2>/dev/null)
+
+# Compile with all possible paths to make it bulletproof
+g++ -std=c++17 -O3 -I"$BREW_INC" -L"$BREW_LIB" $PKG_FLAGS -o server server.cpp -lzmq -lpthread
+
 if [ $? -ne 0 ]; then
     echo "[FATAL] Build failed."
     exit 1
@@ -49,7 +64,7 @@ echo "[OK] server built successfully."
 cd ..
 echo ""
 
-# 7. Launch the server
+# 8. Launch
 echo "[4/4] Starting TradeVerse server..."
 echo ""
 cpp/server
