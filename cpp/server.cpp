@@ -70,6 +70,7 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
 
         if (stock.volume >= qty) {
             stock.volume -= qty;
+            stock.price += (qty * 0.00005); // PRICE IMPACT: Buying drives price up
             wal_log_with_history("BUY", ticker, qty, stock.price, {tid, "BUY", ticker, qty, stock.price, ts, false});
             dirty_flag.store(true);
             return "SUCCESS | Bought " + std::to_string(qty) + " " + ticker +
@@ -81,6 +82,7 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
         if (sellable < qty) return "REJECTED | Insufficient bid-side liquidity!";
 
         stock.volume += qty;
+        stock.price -= (qty * 0.00005); // PRICE IMPACT: Selling drives price down
         wal_log_with_history("SELL", ticker, qty, stock.price, {tid, "SELL", ticker, qty, stock.price, ts, false});
         dirty_flag.store(true);
         return "SUCCESS | Sold " + std::to_string(qty) + " " + ticker +

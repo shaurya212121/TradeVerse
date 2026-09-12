@@ -16,6 +16,8 @@ def bot_worker(bot_id, num_requests, target_ip):
     socket.connect(f"tcp://{target_ip}:5556")
     
     latencies = []
+    successes = 0
+    rejections = 0
     
     for _ in range(num_requests):
         ticker = random.choice(TICKERS)
@@ -28,14 +30,20 @@ def bot_worker(bot_id, num_requests, target_ip):
         
         try:
             socket.send_string(command)
-            # Wait for the C++ server to reply SUCCESS or REJECTED
-            socket.recv_string() 
+            # ACTUALLY CHECK THE REPLY HERE TO SEE IF IT WORKED
+            reply = socket.recv_string() 
             end_time = time.perf_counter()
+            
+            if reply.startswith("SUCCESS"):
+                successes += 1
+            else:
+                rejections += 1
+
             latencies.append((end_time - start_time) * 1000) # convert to milliseconds
         except Exception as e:
             pass # If a request fails or drops, we just ignore it and keep hammering
             
-    return latencies
+    return latencies, successes, rejections
 
 def calculate_percentile(data, percentile):
     """Helper to calculate p50, p95, p99 without needing external libraries like numpy."""
@@ -66,7 +74,14 @@ if __name__ == "__main__":
     end_total = time.time()
     
     # Flatten the results from all bots into one giant list
-    all_latencies = [lat for sublist in results for lat in sublist]
+    all_latencies = []
+    total_successes = 0
+    total_rejections = 0
+    
+    for lat, succ, rej in results:
+        all_latencies.extend(lat)
+        total_successes += succ
+        total_rejections += rej
     
     if not all_latencies:
         print("❌ No successful requests recorded. Is the C++ server running?")
@@ -84,7 +99,9 @@ if __name__ == "__main__":
         print("\n" + "="*40)
         print("📊 STRESS TEST RESULTS")
         print("="*40)
-        print(f"Total Orders Executed : {actual_requests} / {total_expected}")
+        print(f"Total Requests      : {actual_requests} / {total_expected}")
+        print(f"SUCCESSFUL Trades   : {total_successes} ✅")
+        print(f"REJECTED Trades     : {total_rejections} ❌")
         print(f"Time Taken          : {total_time_seconds:.2f} seconds")
         print(f"Throughput          : {throughput:.2f} orders / second")
         
