@@ -9,7 +9,6 @@
 //  PORTFOLIO / STATUS helpers (defined here — after both headers are included)
 // ============================================================================
 std::string get_portfolio_display() {
-    std::lock_guard<std::mutex> lock(market_lock);
     if (live_market_prices.empty()) return "ERROR | No market data loaded.";
     std::ostringstream oss;
     oss << "PORTFOLIO\n" << std::string(72, '=') << "\n";
@@ -21,6 +20,7 @@ std::string get_portfolio_display() {
         << std::setw(14) << "BEST ASK"
         << "\n" << std::string(72, '-') << "\n";
     for (const auto& [ticker, info] : live_market_prices) {
+        std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
         // get_best_bid_ask locks this ticker's own book_lock internally
         auto [best_bid, best_ask] = get_best_bid_ask(ticker);
         oss << std::fixed << std::setprecision(2)
@@ -54,11 +54,11 @@ std::string get_status_display() {
 //  TRADE EXECUTION (MARKET ORDERS)
 // ============================================================================
 std::string execute_trade(const std::string& action, const std::string& ticker, int qty) {
-    std::lock_guard<std::mutex> lock(market_lock);
-
     if (live_market_prices.find(ticker) == live_market_prices.end()) {
         return "REJECTED | Asset '" + ticker + "' not found.";
     }
+
+    std::lock_guard<std::mutex> lock(ticker_price_locks.at(ticker));
 
     StockInfo& stock = live_market_prices[ticker];
     std::string ts = get_timestamp();
@@ -102,8 +102,8 @@ std::string cancel_trade(int trade_id) {
             t.cancelled = true;
             // Reverse the volume effect
             {
-                std::lock_guard<std::mutex> mlock(market_lock);
                 if (live_market_prices.count(t.ticker)) {
+                    std::lock_guard<std::mutex> mlock(ticker_price_locks.at(t.ticker));
                     if (t.action == "BUY")  live_market_prices[t.ticker].volume += t.qty;
                     else                    live_market_prices[t.ticker].volume -= t.qty;
                     dirty_flag.store(true);
@@ -178,8 +178,8 @@ void chatbox_worker_routine(zmq::context_t* context) {
         // ---- FETCH PRICE ----
         else if (client_msg.rfind("FETCH:", 0) == 0) {
             std::string target = trim(client_msg.substr(6));
-            std::lock_guard<std::mutex> lock(market_lock);
             if (live_market_prices.count(target)) {
+                std::lock_guard<std::mutex> lock(ticker_price_locks.at(target));
                 auto& info = live_market_prices[target];
                 auto [bid, ask] = get_best_bid_ask(target);
                 std::ostringstream oss;
@@ -291,7 +291,9 @@ int main() {
                 volume = 1000000;
             }
             // Keep only the latest price per ticker (CSV is sorted by time)
-            live_market_prices[trim(tkr)] = {trim(ts), std::stod(trim(prc)), volume};
+            std::string clean_ticker = trim(tkr);
+            live_market_prices[clean_ticker] = {trim(ts), std::stod(trim(prc)), volume};
+            ticker_price_locks[clean_ticker];
             loaded++;
         } catch (...) {
             // Skip malformed rows silently
@@ -333,8 +335,8 @@ int main() {
 
     while (true) {
         {
-            std::lock_guard<std::mutex> lock(market_lock);
             for (const auto& [ticker, info] : live_market_prices) {
+                std::lock_guard<std::mutex> lock(ticker_price_locks.at(ticker));
                 std::ostringstream msg_ss;
                 msg_ss << ticker << ",$" << std::fixed << std::setprecision(2) << info.price;
                 std::string msg = msg_ss.str();
