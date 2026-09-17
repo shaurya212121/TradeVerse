@@ -40,9 +40,6 @@ struct TradeRecord {
 inline std::unordered_map<std::string, StockInfo> live_market_prices;
 inline std::mutex market_lock;
 
-// Fix 4: one dedicated mutex per ticker, populated at startup
-inline std::unordered_map<std::string, std::mutex> ticker_price_locks;
-
 inline std::deque<TradeRecord> trade_history;
 inline std::mutex history_lock;
 inline std::atomic<int> next_trade_id{1};
@@ -215,12 +212,12 @@ inline void log_trade_history(const TradeRecord& trade) {
 }
 
 inline void sync_to_csv() {
+    std::lock_guard<std::mutex> lock(market_lock);
     std::ofstream file(CSV_FILE, std::ios::trunc);
     if (!file.is_open()) return;
 
     file << "Date,Ticker,Price,Volume\n";
     for (const auto& [ticker, info] : live_market_prices) {
-        std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
         file << info.timestamp << "," << ticker << "," << std::fixed << std::setprecision(2)
              << info.price << "," << info.volume << "\n";
     }
@@ -285,10 +282,10 @@ inline void price_simulator_thread() {
 
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(PRICE_TICK_MS));
+        std::lock_guard<std::mutex> lock(market_lock);
         std::string ts = get_timestamp();
 
         for (auto& [ticker, info] : live_market_prices) {
-            std::lock_guard<std::mutex> lock(ticker_price_locks.at(ticker));
             double sigma = 0.0012;
             if (TICKER_VOLATILITY.count(ticker)) sigma = TICKER_VOLATILITY.at(ticker);
 
