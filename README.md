@@ -299,14 +299,19 @@ When deployed on an Ubuntu machine utilizing Python multiprocessing, the engine 
 ![Ubuntu Stress Test](assets/stress_test_ubuntu.png)
 
 ### Windows Local Environment
-In a standard local Windows environment with 20 concurrent threads running 100,000 requests:
-*   **Throughput:** ~15,288 orders / second
-*   **Latency (p99):** ~2.84 ms
-*   **Data Integrity:** 99.9% Success Rate (Only legitimate liquidity rejections)
+In a standard local Windows environment with 20 concurrent threads running 100,000 requests, the engine sustains high throughput while strictly maintaining data integrity:
+*   **Throughput:** ~12,000 - 15,000 orders / second
+*   **Latency (p99):** ~3.28 ms
 
-> *Note: Removing price-impact simulation increases throughput to ~15.2k TPS. Enabling live price-impact math during stress tests yields ~10.6k TPS.*
+![Windows Stress Test](assets/stress_test_final.png)
 
-![Windows Stress Test](assets/stress_test_15k.png)
+### Architecture & Correctness Validation
+To ensure the matching engine is mathematically flawless under high concurrency, it passes strict verification tests:
+*   **Conservation Check:** Shares are never duplicated or destroyed when crossing the spread.
+*   **Time-Priority Check:** Identical limit orders strictly follow FIFO execution fairness.
+*   **Concentrated Stress Test:** Single-ticker locks survive 20,000+ simultaneous limit orders without deadlocking.
+
+![Correctness Tests](assets/correctness_tests.png)
 
 ---
 
