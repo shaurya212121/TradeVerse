@@ -86,8 +86,8 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
         if (stock.volume >= qty) {
             stock.volume -= qty;
             double price = stock.price;
-            // Market buy impact: buying pressure ticks price up by $0.01
-            stock.price = std::round((stock.price + 0.01) * 100.0) / 100.0;
+            // Market buy impact: buying pressure ticks price up
+            stock.price = std::round((stock.price + (qty * 0.00005)) * 100.0) / 100.0;
             wal_log_with_history("BUY", ticker, qty, price, {tid, "BUY", ticker, qty, price, ts, false});
             dirty_flag.store(true);
             return "SUCCESS | Bought " + std::to_string(qty) + " " + ticker +
@@ -102,9 +102,9 @@ std::string execute_trade(const std::string& action, const std::string& ticker, 
         StockInfo& stock = live_market_prices.at(ticker);
         stock.volume += qty;
         double price = stock.price;
-        // Market sell impact: selling pressure ticks price down by $0.01
+        // Market sell impact: selling pressure ticks price down
         double base = base_prices.count(ticker) ? base_prices.at(ticker) : stock.price;
-        stock.price = std::max(std::round((stock.price - 0.01) * 100.0) / 100.0, base * 0.01);
+        stock.price = std::max(std::round((stock.price - (qty * 0.00005)) * 100.0) / 100.0, base * 0.01);
         wal_log_with_history("SELL", ticker, qty, price, {tid, "SELL", ticker, qty, price, ts, false});
         dirty_flag.store(true);
         return "SUCCESS | Sold " + std::to_string(qty) + " " + ticker +

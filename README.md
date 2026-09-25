@@ -292,7 +292,35 @@ TradeVerse/
 
 ---
 
-## 🔧 Build & Configuration
+## ⚡ Performance & Stress Testing
+
+TradeVerse is designed for high throughput and low latency. The architecture utilizes **Ticker Sharding** (independent lock-free queues per stock) for Limit Orders and a highly optimized global lock for Market Orders. 
+
+### Linux (Ubuntu) High-Performance Environment
+When deployed on an Ubuntu machine utilizing Python multiprocessing, the engine is capable of processing **1,000,000 requests** flawlessly:
+*   **Throughput:** ~106,044 orders / second
+*   **Latency (p99):** ~3.12 ms
+
+![Ubuntu Stress Test](assets/stress_test_ubuntu.png)
+
+### Windows Local Environment
+In a standard local Windows environment with 20 concurrent threads running 100,000 requests, the engine sustains high throughput while strictly maintaining data integrity:
+*   **Throughput:** ~12,000 - 15,000 orders / second
+*   **Latency (p99):** ~3.28 ms
+
+![Windows Stress Test](assets/stress_test_final.png)
+
+### Architecture & Correctness Validation
+To ensure the matching engine is mathematically flawless under high concurrency, it passes strict verification tests:
+*   **Conservation Check:** Shares are never duplicated or destroyed when crossing the spread.
+*   **Time-Priority Check:** Identical limit orders strictly follow FIFO execution fairness.
+*   **Concentrated Stress Test:** Single-ticker locks survive 20,000+ simultaneous limit orders without deadlocking.
+
+![Correctness Tests](assets/correctness_tests.png)
+
+---
+
+## 🛠️  Build & Configuration
 
 ### Build from Source
 
