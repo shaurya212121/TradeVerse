@@ -247,11 +247,15 @@ inline std::string process_limit_order(const std::string& side, const std::strin
         // The price at which orders actually matched in the book is now the
         // official market price. This is what gets broadcast to the dashboard
         // via the publisher on port 5555 — bots now move prices, not the RNG.
-        {
-            std::lock_guard<std::mutex> mlock(market_lock);
+        // Fix 4: use per-ticker price lock — consistent with execute_trade ordering.
+        // book_lock is already held above; we then take price_lock inside, same order
+        // as execute_trade.  market_lock is NOT taken, so this doesn't serialize with
+        // trades on other tickers.
+        if (ticker_price_locks.count(ticker)) {
+            std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
             if (live_market_prices.count(ticker)) {
-                live_market_prices[ticker].price     = avg_fill;
-                live_market_prices[ticker].timestamp = ts;
+                live_market_prices.at(ticker).price     = avg_fill;
+                live_market_prices.at(ticker).timestamp = ts;
             }
         }
     }

@@ -38,7 +38,12 @@ struct TradeRecord {
 // ============================================================================
 
 inline std::unordered_map<std::string, StockInfo> live_market_prices;
-inline std::mutex market_lock;
+inline std::mutex market_lock;  // kept for structural reads (size, existence checks)
+
+// Fix 4 (complete): one dedicated price lock per ticker, populated at startup.
+// execute_trade / price_simulator / sync_to_csv all use these instead of market_lock
+// for per-StockInfo reads and writes, so unrelated tickers don't contend at all.
+inline std::unordered_map<std::string, std::mutex> ticker_price_locks;
 
 inline std::deque<TradeRecord> trade_history;
 inline std::mutex history_lock;
@@ -215,14 +220,20 @@ inline void log_trade_history(const TradeRecord& trade) {
 }
 
 inline void sync_to_csv() {
-    std::lock_guard<std::mutex> lock(market_lock);
     std::ofstream file(CSV_FILE, std::ios::trunc);
     if (!file.is_open()) return;
 
     file << "Date,Ticker,Price,Volume\n";
-    for (const auto& [ticker, info] : live_market_prices) {
-        file << info.timestamp << "," << ticker << "," << std::fixed << std::setprecision(2)
-             << info.price << "," << info.volume << "\n";
+    // Lock each ticker individually — keeps CSV consistent per-row without
+    // blocking execute_trade on other tickers while we write.
+    for (const auto& [ticker, info_ignored] : live_market_prices) {
+        StockInfo snap;
+        {
+            std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
+            snap = live_market_prices.at(ticker);
+        }
+        file << snap.timestamp << "," << ticker << "," << std::fixed << std::setprecision(2)
+             << snap.price << "," << snap.volume << "\n";
     }
     file.close();
 
@@ -285,15 +296,19 @@ inline void price_simulator_thread() {
 
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(PRICE_TICK_MS));
-        std::lock_guard<std::mutex> lock(market_lock);
         std::string ts = get_timestamp();
 
+        // Fix 4: lock each ticker individually — a market order on TSLA can now
+        // proceed while we're updating AAPL's price.  The global market_lock is
+        // NOT held here, so the broadcaster and execute_trade don't block us.
         for (auto& [ticker, info] : live_market_prices) {
+            std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
+
             double sigma = 0.0012;
             if (TICKER_VOLATILITY.count(ticker)) sigma = TICKER_VOLATILITY.at(ticker);
 
             double shock = sigma * norm(rng);
-            double base = base_prices.count(ticker) ? base_prices[ticker] : info.price;
+            double base = base_prices.count(ticker) ? base_prices.at(ticker) : info.price;
             double reversion = 0.02 * (base - info.price) / base;
 
             double new_price = info.price * (1.0 + shock + reversion);
