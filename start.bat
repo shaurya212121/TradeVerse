@@ -9,7 +9,8 @@ echo.
 :: Step 1: Fetch latest market data from Yahoo Finance
 echo [1/4] Syncing latest market data from Yahoo Finance...
 echo.
-python python\data.py
+set PYTHONWARNINGS=ignore
+python python\data.py 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [WARNING] Data fetch failed. Checking for existing CSV...
