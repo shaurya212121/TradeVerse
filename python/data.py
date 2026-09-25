@@ -1,7 +1,14 @@
+import sys
+import os
+import warnings
+
+# Completely suppress stderr (where warnings are printed) to prevent yfinance from cluttering the console
+sys.stderr = open(os.devnull, 'w')
+warnings.filterwarnings("ignore")
+
 import yfinance as yf
 import pandas as pd
 import time
-import os
 
 # Stocks to fetch
 stocks = [
