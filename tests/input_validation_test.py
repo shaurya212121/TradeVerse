@@ -44,4 +44,4 @@ if match:
 else:
     print(f"❌ Could not place test order. Server replied: {r_real.strip()}")
 
-print("\n(If all the checks above say ERROR or REJECTED—except for 'Double Cancel Try 1' which should be SUCCESS—then your server is officially Hacker-Proof! ✅)")
+print("\n(If all the checks above say ERROR or REJECTED -- except for 'Double Cancel Try 1' which should be SUCCESS -- then your server is officially Hacker-Proof!)")
