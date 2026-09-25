@@ -5,17 +5,27 @@
 #   pacman -S mingw-w64-x86_64-zeromq
 #   make
 #
-# On Linux/macOS:
+# On Linux:
 #   sudo apt install libzmq3-dev   (Ubuntu/Debian)
-#   brew install zeromq             (macOS)
+#   make
+#
+# On macOS:
+#   brew install zeromq
 #   make
 
 CXX      = g++
 CXXFLAGS = -std=c++17 -O2 -Wall -Wextra
-LDFLAGS  = -lzmq -lws2_32 -lpthread
 
-TARGET   = server.exe
-SRC      = server.cpp
+# Platform-specific linker flags
+ifeq ($(OS),Windows_NT)
+    LDFLAGS = -lzmq -lws2_32 -lpthread
+    TARGET  = server.exe
+else
+    LDFLAGS = -lzmq -lpthread
+    TARGET  = server
+endif
+
+SRC = server.cpp
 
 .PHONY: all clean run
 
@@ -29,5 +39,9 @@ run: $(TARGET)
 	@cd .. && cpp/$(TARGET)
 
 clean:
+ifeq ($(OS),Windows_NT)
 	@if exist $(TARGET) del /Q $(TARGET)
+else
+	@rm -f $(TARGET)
+endif
 	@echo "[CLEAN] Build artifacts removed."

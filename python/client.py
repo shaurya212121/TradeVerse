@@ -13,20 +13,17 @@ print("-" * 65)
 
 while True:
     raw_packet = subscriber.recv_string()
-    data_list = raw_packet.split(',')
 
-    # New 4-field format: TICKER, TIMESTAMP, $PRICE, Vol:VOLUME
-    if len(data_list) == 4:
-        ticker    = data_list[0].strip()
-        timestamp = data_list[1].strip()
-        price_str = data_list[2].strip().lstrip('$')
-        vol_str   = data_list[3].strip().replace("Vol:", "")
+    # Server sends 2-field format: "TICKER,$PRICE"  (e.g. "AAPL,$341.50")
+    parts = raw_packet.split(",$")
+    if len(parts) == 2:
+        ticker = parts[0].strip()
+        price_str = parts[1].strip()
 
         try:
             spot_price = float(price_str)
-            volume     = int(vol_str)
-            print(f"📊 {ticker:<14} | Time: {timestamp} | Price: ${spot_price:.2f} | Vol: {volume}")
+            print(f"📊 {ticker:<14} | Price: ${spot_price:.2f}")
         except ValueError:
             print(f"⚠️  Parse error: {raw_packet}")
     else:
-        print(f"⚠️  Dropped malformed packet ({len(data_list)} fields): {raw_packet}")
+        print(f"⚠️  Dropped malformed packet ({len(parts)} fields): {raw_packet}")

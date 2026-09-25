@@ -121,6 +121,26 @@ inline int get_sellable_qty(const std::string& ticker) {
     return total;
 }
 
+// ============================================================================
+//  LOCK-FREE READ HELPERS — caller MUST already hold shard.book_lock
+//  These exist to avoid deadlock when execute_trade() grabs book_lock
+//  and then needs to check liquidity.
+// ============================================================================
+
+inline int get_buyable_qty_unsafe(const std::string& ticker) {
+    int total = 0;
+    for (const auto& [p, orders] : order_books[ticker].asks)
+        for (const auto& o : orders) total += o.qty;
+    return total;
+}
+
+inline int get_sellable_qty_unsafe(const std::string& ticker) {
+    int total = 0;
+    for (const auto& [p, orders] : order_books[ticker].bids)
+        for (const auto& o : orders) total += o.qty;
+    return total;
+}
+
 inline std::pair<double, double> get_best_bid_ask(const std::string& ticker) {
     double best_bid = 0.0, best_ask = 0.0;
     if (!shards.count(ticker)) return {best_bid, best_ask};
@@ -216,12 +236,28 @@ inline std::string process_limit_order(const std::string& side, const std::strin
     // Register resting order ID outside book_lock (safe — client doesn't have the ID yet)
     if (new_oid > 0) register_order_id(new_oid, ticker);
 
-    // Log filled portion
+    // Log filled portion + price discovery: executed fill price becomes the market price
     if (filled > 0) {
+        double avg_fill = fill_val / filled;
         std::string act = (side == "BID") ? "BUY" : "SELL";
-        wal_log(act, ticker, filled, fill_val / filled);
+        wal_log(act, ticker, filled, avg_fill);
         dirty_flag.store(true);
-        log_trade_history({next_trade_id.fetch_add(1), act, ticker, filled, fill_val / filled, ts, false});
+        log_trade_history({next_trade_id.fetch_add(1), act, ticker, filled, avg_fill, ts, false});
+        // ── PRICE DISCOVERY ──────────────────────────────────────────────────
+        // The price at which orders actually matched in the book is now the
+        // official market price. This is what gets broadcast to the dashboard
+        // via the publisher on port 5555 — bots now move prices, not the RNG.
+        // Fix 4: use per-ticker price lock — consistent with execute_trade ordering.
+        // book_lock is already held above; we then take price_lock inside, same order
+        // as execute_trade.  market_lock is NOT taken, so this doesn't serialize with
+        // trades on other tickers.
+        if (ticker_price_locks.count(ticker)) {
+            std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
+            if (live_market_prices.count(ticker)) {
+                live_market_prices.at(ticker).price     = avg_fill;
+                live_market_prices.at(ticker).timestamp = ts;
+            }
+        }
     }
 
     std::ostringstream oss;

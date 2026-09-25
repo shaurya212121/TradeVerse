@@ -9,8 +9,8 @@
 //  PORTFOLIO / STATUS helpers (defined here — after both headers are included)
 // ============================================================================
 std::string get_portfolio_display() {
-    std::lock_guard<std::mutex> lock(market_lock);
     if (live_market_prices.empty()) return "ERROR | No market data loaded.";
+
     std::ostringstream oss;
     oss << "PORTFOLIO\n" << std::string(72, '=') << "\n";
     oss << std::left
@@ -20,13 +20,20 @@ std::string get_portfolio_display() {
         << std::setw(14) << "BEST BID"
         << std::setw(14) << "BEST ASK"
         << "\n" << std::string(72, '-') << "\n";
-    for (const auto& [ticker, info] : live_market_prices) {
-        // get_best_bid_ask locks this ticker's own book_lock internally
-        auto [best_bid, best_ask] = get_best_bid_ask(ticker);
+    // Lock each ticker individually — consistent with execute_trade's lock ordering.
+    // get_best_bid_ask() will then take book_lock internally (price-lock released first
+    // to avoid holding two locks simultaneously).
+    for (const auto& [ticker, info_ignored] : live_market_prices) {
+        StockInfo snap;
+        {
+            std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
+            snap = live_market_prices.at(ticker);
+        }
+        auto [best_bid, best_ask] = get_best_bid_ask(ticker); // takes book_lock internally
         oss << std::fixed << std::setprecision(2)
             << std::left << std::setw(14) << ticker
-            << std::left << std::setw(14) << info.price
-            << std::left << std::setw(14) << info.volume
+            << std::left << std::setw(14) << snap.price
+            << std::left << std::setw(14) << snap.volume
             << std::left << std::setw(14) << best_bid
             << std::left << std::setw(14) << best_ask
             << "\n";
@@ -52,41 +59,56 @@ std::string get_status_display() {
 }
 // ============================================================================
 //  TRADE EXECUTION (MARKET ORDERS)
+//  FIX 4: Per-ticker sharding — uses shard.book_lock instead of global
+//  market_lock. BUY AAPL and BUY TSLA now execute fully in parallel.
+//  Uses _unsafe helpers to avoid deadlock (we already hold book_lock).
 // ============================================================================
 std::string execute_trade(const std::string& action, const std::string& ticker, int qty) {
-    std::lock_guard<std::mutex> lock(market_lock);
-
-    if (live_market_prices.find(ticker) == live_market_prices.end()) {
+    if (!shards.count(ticker) || !ticker_price_locks.count(ticker))
         return "REJECTED | Asset '" + ticker + "' not found.";
-    }
 
-    StockInfo& stock = live_market_prices[ticker];
+
+    // Lock ONLY this ticker's shard — other tickers proceed in parallel
+    auto& shard = shards[ticker];
+    std::lock_guard<std::mutex> bk(shard.book_lock);
+
     std::string ts = get_timestamp();
     int tid = next_trade_id.fetch_add(1);
 
+    // Fix 4 (complete): use THIS ticker's own price lock — not the global market_lock.
+    // book_lock (already held above) → price_lock ordering is consistent everywhere.
     if (action == "BUY") {
-        int buyable = get_buyable_qty(ticker);
+        int buyable = get_buyable_qty_unsafe(ticker);  // safe — already hold book_lock
         if (buyable < qty) return "REJECTED | Insufficient ask-side liquidity!";
 
+        std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
+        StockInfo& stock = live_market_prices.at(ticker);
         if (stock.volume >= qty) {
             stock.volume -= qty;
-            stock.price += (qty * 0.00005); // PRICE IMPACT: Buying drives price up
-            wal_log_with_history("BUY", ticker, qty, stock.price, {tid, "BUY", ticker, qty, stock.price, ts, false});
+            double price = stock.price;
+            // Market buy impact: buying pressure ticks price up
+            stock.price = std::round((stock.price + (qty * 0.00005)) * 100.0) / 100.0;
+            wal_log_with_history("BUY", ticker, qty, price, {tid, "BUY", ticker, qty, price, ts, false});
             dirty_flag.store(true);
             return "SUCCESS | Bought " + std::to_string(qty) + " " + ticker +
-                   " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << stock.price; return o.str(); }();
+                   " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << price; return o.str(); }();
         }
         return "REJECTED | Insufficient volume.";
     } else if (action == "SELL") {
-        int sellable = get_sellable_qty(ticker);
+        int sellable = get_sellable_qty_unsafe(ticker);  // safe — already hold book_lock
         if (sellable < qty) return "REJECTED | Insufficient bid-side liquidity!";
 
+        std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
+        StockInfo& stock = live_market_prices.at(ticker);
         stock.volume += qty;
-        stock.price -= (qty * 0.00005); // PRICE IMPACT: Selling drives price down
-        wal_log_with_history("SELL", ticker, qty, stock.price, {tid, "SELL", ticker, qty, stock.price, ts, false});
+        double price = stock.price;
+        // Market sell impact: selling pressure ticks price down
+        double base = base_prices.count(ticker) ? base_prices.at(ticker) : stock.price;
+        stock.price = std::max(std::round((stock.price - (qty * 0.00005)) * 100.0) / 100.0, base * 0.01);
+        wal_log_with_history("SELL", ticker, qty, price, {tid, "SELL", ticker, qty, price, ts, false});
         dirty_flag.store(true);
         return "SUCCESS | Sold " + std::to_string(qty) + " " + ticker +
-               " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << stock.price; return o.str(); }();
+               " @ $" + [&]{ std::ostringstream o; o << std::fixed << std::setprecision(2) << price; return o.str(); }();
     }
     return "REJECTED | Invalid action.";
 }
@@ -100,14 +122,12 @@ std::string cancel_trade(int trade_id) {
         if (t.trade_id == trade_id) {
             if (t.cancelled) return "REJECTED | Trade #" + std::to_string(trade_id) + " already cancelled.";
             t.cancelled = true;
-            // Reverse the volume effect
-            {
-                std::lock_guard<std::mutex> mlock(market_lock);
-                if (live_market_prices.count(t.ticker)) {
-                    if (t.action == "BUY")  live_market_prices[t.ticker].volume += t.qty;
-                    else                    live_market_prices[t.ticker].volume -= t.qty;
-                    dirty_flag.store(true);
-                }
+            // Reverse the volume effect — use per-ticker lock, not global market_lock
+            if (live_market_prices.count(t.ticker) && ticker_price_locks.count(t.ticker)) {
+                std::lock_guard<std::mutex> plock(ticker_price_locks.at(t.ticker));
+                if (t.action == "BUY")  live_market_prices.at(t.ticker).volume += t.qty;
+                else                    live_market_prices.at(t.ticker).volume -= t.qty;
+                dirty_flag.store(true);
             }
             return "SUCCESS | Trade #" + std::to_string(trade_id) + " cancelled & reversed.";
         }
@@ -178,15 +198,22 @@ void chatbox_worker_routine(zmq::context_t* context) {
         // ---- FETCH PRICE ----
         else if (client_msg.rfind("FETCH:", 0) == 0) {
             std::string target = trim(client_msg.substr(6));
-            std::lock_guard<std::mutex> lock(market_lock);
-            if (live_market_prices.count(target)) {
-                auto& info = live_market_prices[target];
+            StockInfo info_copy;
+            bool found = false;
+            if (ticker_price_locks.count(target)) {
+                std::lock_guard<std::mutex> plock(ticker_price_locks.at(target));
+                if (live_market_prices.count(target)) {
+                    info_copy = live_market_prices.at(target);
+                    found = true;
+                }
+            }
+            if (found) {
                 auto [bid, ask] = get_best_bid_ask(target);
                 std::ostringstream oss;
                 oss << std::fixed << std::setprecision(2);
                 oss << "SUCCESS | " << target
-                    << " | Price: $" << info.price
-                    << " | Volume: "  << info.volume
+                    << " | Price: $" << info_copy.price
+                    << " | Volume: " << info_copy.volume
                     << " | Bid: $"   << bid
                     << " | Ask: $"   << ask;
                 reply_msg = oss.str();
@@ -291,7 +318,10 @@ int main() {
                 volume = 1000000;
             }
             // Keep only the latest price per ticker (CSV is sorted by time)
-            live_market_prices[trim(tkr)] = {trim(ts), std::stod(trim(prc)), volume};
+            std::string clean_tkr = trim(tkr);
+            live_market_prices[clean_tkr] = {trim(ts), std::stod(trim(prc)), volume};
+            // Populate ticker_price_locks now (single-threaded) — no concurrent-insertion risk
+            ticker_price_locks[clean_tkr];
             loaded++;
         } catch (...) {
             // Skip malformed rows silently
@@ -332,16 +362,25 @@ int main() {
     std::cout << "[INIT] Server fully started. Ready to accept trades.\n\n";
 
     while (true) {
-        {
-            std::lock_guard<std::mutex> lock(market_lock);
-            for (const auto& [ticker, info] : live_market_prices) {
-                std::ostringstream msg_ss;
-                msg_ss << ticker << ",$" << std::fixed << std::setprecision(2) << info.price;
-                std::string msg = msg_ss.str();
-                zmq::message_t zmq_msg(msg.size());
-                memcpy(zmq_msg.data(), msg.data(), msg.size());
-                publisher.send(zmq_msg, zmq::send_flags::none);
+        // Fix 4 (broadcaster): snapshot each ticker's price under its own lock,
+        // then send outside the lock.  No single lock is held across the whole sweep,
+        // so execute_trade on any ticker is never blocked by this loop.
+        std::vector<std::pair<std::string, std::string>> snapshots;
+        snapshots.reserve(live_market_prices.size());
+        for (const auto& [ticker, info_ignored] : live_market_prices) {
+            double price_snap;
+            {
+                std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
+                price_snap = live_market_prices.at(ticker).price;
             }
+            std::ostringstream msg_ss;
+            msg_ss << ticker << ",$" << std::fixed << std::setprecision(2) << price_snap;
+            snapshots.emplace_back(ticker, msg_ss.str());
+        }
+        for (const auto& [ticker, msg] : snapshots) {
+            zmq::message_t zmq_msg(msg.size());
+            memcpy(zmq_msg.data(), msg.data(), msg.size());
+            publisher.send(zmq_msg, zmq::send_flags::none);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
