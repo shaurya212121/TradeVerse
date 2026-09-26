@@ -4,6 +4,8 @@ echo " TradeVerse — Ultimate Mac Auto-Setup"
 echo "========================================"
 echo ""
 
+cd backend || exit 1
+
 # 1. Check for Homebrew
 if ! command -v brew &> /dev/null; then
     echo "[FATAL] Homebrew is not installed! Paste this in your terminal first:"
