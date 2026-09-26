@@ -6,6 +6,8 @@ echo   TradeVerse — Startup Sequence
 echo  ========================================
 echo.
 
+cd backend
+
 :: Step 1: Fetch latest market data from Yahoo Finance
 echo [1/4] Syncing latest market data from Yahoo Finance...
 echo.
