@@ -23,21 +23,17 @@ export function connectWebSocket() {
       const store = useMarketStore.getState();
 
       if (data.type === 'TICK') {
-        // Calculate fake timestamp or use provided
         const timestamp = data.timestamp || Date.now();
         const prevData = store.prices[data.ticker];
         
-        store.updatePrice(data.ticker, {
+        store.updatePrice({
           ticker: data.ticker,
           price: data.price,
           change: prevData ? data.price - prevData.price : 0,
           timestamp
         });
       } else if (data.type === 'ORDERBOOK') {
-        store.updateOrderBook(data.data as OrderBookSnapshot);
-      } else if (data.type === 'ORDER_RESPONSE') {
-        // Handled via promise queue in a real robust app, 
-        // but for now we just log it or handle it in the UI component
+        store.setOrderBook(data.data as OrderBookSnapshot);
       }
     } catch (e) {
       console.error('Error parsing WS message', e);
@@ -45,14 +41,14 @@ export function connectWebSocket() {
   };
 
   socket.onclose = () => {
-    useMarketStore.getState().setConnectionStatus('disconnected');
+    useMarketStore.getState().setConnectionStatus('offline');
     socket = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = window.setTimeout(connectWebSocket, 2000);
   };
 
   socket.onerror = () => {
-    useMarketStore.getState().setConnectionStatus('disconnected');
+    useMarketStore.getState().setConnectionStatus('offline');
   };
 }
 
