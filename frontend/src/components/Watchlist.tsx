@@ -3,15 +3,21 @@ import { useMarketStore } from '../store/marketStore';
 import type { Ticker } from '../types';
 import { usePriceFlash } from '../hooks/usePriceFlash';
 import { Search } from 'lucide-react';
+import { setActiveTicker as wsSetActiveTicker } from '../api/ws';
 
 const WatchlistRow = ({ ticker, isActive }: { ticker: Ticker, isActive: boolean }) => {
   const { prices, setActiveTicker } = useMarketStore();
   const data = prices[ticker];
   const flash = usePriceFlash(data?.price);
 
+  const handleSelect = () => {
+    setActiveTicker(ticker);
+    wsSetActiveTicker(ticker);
+  };
+
   return (
     <div 
-      onClick={() => setActiveTicker(ticker)}
+      onClick={handleSelect}
       className={`flex justify-between items-center px-3 py-2 cursor-pointer border-b border-border text-sm transition-colors ${
         isActive ? 'bg-border border-l-2 border-l-accent' : 'hover:bg-surface border-l-2 border-l-transparent'
       } ${flash}`}
