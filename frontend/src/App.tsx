@@ -5,12 +5,12 @@ import { PriceChart } from './components/PriceChart';
 import { OrderBook } from './components/OrderBook';
 import { OrderEntryForm } from './components/OrderEntryForm';
 import { TradeHistory } from './components/TradeHistory';
-import { startMockDataStream, stopMockDataStream } from './api/mock';
+import { connectWebSocket, disconnectWebSocket } from './api/ws';
 
 function App() {
   useEffect(() => {
-    startMockDataStream();
-    return () => stopMockDataStream();
+    connectWebSocket();
+    return () => disconnectWebSocket();
   }, []);
 
   return (

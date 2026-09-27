@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useMarketStore } from '../store/marketStore';
-import { submitMockOrder } from '../api/mock';
+import { submitOrder } from '../api/ws';
 
 export const OrderEntryForm: React.FC = () => {
   const { activeTicker } = useMarketStore();
@@ -19,12 +19,11 @@ export const OrderEntryForm: React.FC = () => {
 
     try {
       const typeStr = orderType === 'MARKET' ? side : `LIMIT_${side}`;
-      const res = await submitMockOrder({
-        type: typeStr as any,
-        ticker: activeTicker,
-        qty: parseInt(qty, 10),
-        price: orderType === 'LIMIT' ? parseFloat(price) : undefined
-      });
+      const command = orderType === 'LIMIT' 
+        ? `${typeStr}:${activeTicker}:${qty}:${price}`
+        : `${typeStr}:${activeTicker}:${qty}`;
+        
+      const res = await submitOrder(command);
 
       setFeedback({ msg: res.message, isError: !res.success });
       
