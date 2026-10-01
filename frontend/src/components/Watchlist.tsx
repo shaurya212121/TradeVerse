@@ -42,7 +42,7 @@ export const Watchlist: React.FC = () => {
   const tickers = Object.keys(prices) as Ticker[];
 
   return (
-    <div className="h-full flex flex-col bg-surface border-r border-border">
+    <div className="h-full flex flex-col bg-surface">
       <div className="p-2 border-b border-border">
         <div className="relative">
           <Search size={14} className="absolute left-2 top-2 text-text-muted" />

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import zmq
@@ -155,13 +156,52 @@ async def orderbook_poller():
                     })
             except Exception as e:
                 logger.error(f"Error polling orderbook: {e}")
-        
         await asyncio.sleep(0.5)
+
+async def account_poller():
+    """Polls the gateway account cash and holdings every 1s."""
+    logger.info("Account poller started.")
+    while True:
+        if manager.active_connections:
+            try:
+                response = await send_zmq_request("ACCOUNT:web_gateway")
+                if "ERROR" not in response:
+                    # ACCOUNT: web_gateway | Cash: $100000.00 | Holdings: AAPL: 10, TSLA: 5
+                    cash_match = re.search(r"Cash:\s*\$([0-9.]+)", response)
+                    cash = float(cash_match.group(1)) if cash_match else 0.0
+                    
+                    holdings = []
+                    if "Holdings: " in response and "None" not in response.split("Holdings: ")[1]:
+                        holdings_str = response.split("Holdings: ")[1].strip()
+                        pairs = holdings_str.split(",")
+                        for pair in pairs:
+                            if ":" in pair:
+                                tkr, qty = pair.split(":")
+                                holdings.append({"ticker": tkr.strip(), "qty": int(qty.strip()), "avgPrice": 0})
+                                
+                    await manager.broadcast({
+                        "type": "PORTFOLIO",
+                        "cash": cash,
+                        "holdings": holdings
+                    })
+            except Exception as e:
+                logger.error(f"Error polling account: {e}")
+        
+        await asyncio.sleep(1.0)
+
 
 @app.on_event("startup")
 async def startup_event():
+    # Register the gateway's account with the C++ engine
+    try:
+        res = await send_zmq_request("REGISTER:web_gateway")
+        logger.info(f"Registered gateway account: {res}")
+    except Exception as e:
+        logger.error(f"Failed to register gateway account: {e}")
+        
     asyncio.create_task(zmq_sub_worker())
     asyncio.create_task(orderbook_poller())
+    asyncio.create_task(account_poller())
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -179,6 +219,15 @@ async def websocket_endpoint(websocket: WebSocket):
             elif payload.get("action") == "SUBMIT_ORDER":
                 cmd = payload.get("command") # e.g., "BUY:AAPL:10"
                 if cmd:
+                    # Inject client_id and idempotency UUID for MARKET orders
+                    parts = cmd.strip().split(":")
+                    if len(parts) >= 3 and parts[0].upper() in ("BUY", "SELL"):
+                        action = parts[0].upper()
+                        ticker = parts[1].upper()
+                        qty = parts[2]
+                        req_id = str(uuid.uuid4())
+                        cmd = f"{action}:web_gateway:{ticker}:{qty}:{req_id}"
+
                     logger.info(f"Submitting order: {cmd}")
                     res = await send_zmq_request(cmd)
                     await websocket.send_json({

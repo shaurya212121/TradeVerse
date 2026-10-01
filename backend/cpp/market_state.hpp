@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include "utils.hpp"
+#include "crc32.hpp"
 
 // ============================================================================
 //  DATA STRUCTURES
@@ -144,12 +145,17 @@ inline void async_wal_writer_thread() {
             wal_queue.pop();
         }
 
-        // --- WAL write (skip for history-only entries) ---
+        // --- WAL write with CRC32 checksum ---
         if (!entry.action.empty()) {
             if (wal.is_open()) {
-                wal << entry.action << "|" << entry.ticker << "|" << entry.qty << "|"
+                std::ostringstream payload_ss;
+                payload_ss << entry.action << "|" << entry.ticker << "|" << entry.qty << "|"
                     << std::fixed << std::setprecision(2) << entry.price << "|"
-                    << entry.timestamp << "\n";
+                    << entry.timestamp;
+                std::string payload = payload_ss.str();
+                std::string checksum = crc32_hex(payload);
+                wal << payload << "|" << checksum << "\n";
+                wal.flush();  // ensure durability — crash-safe
             }
         }
 
@@ -168,37 +174,7 @@ inline void async_wal_writer_thread() {
     }
 }
 
-// ---------- replay (runs once at startup, before threads) ----------
-inline void replay_wal() {
-    std::ifstream wal(WAL_FILE);
-    if (!wal.is_open()) return; 
 
-    std::string line;
-    int replayed = 0;
-
-    while (std::getline(wal, line)) {
-        line = trim(line);
-        if (line.empty()) continue;
-
-        std::stringstream ss(line);
-        std::string action, ticker, qty_str, price_str, timestamp;
-        std::getline(ss, action, '|');
-        std::getline(ss, ticker, '|');
-        std::getline(ss, qty_str, '|');
-        std::getline(ss, price_str, '|');
-        std::getline(ss, timestamp, '|');
-        try {
-            int qty = std::stoi(qty_str);
-            if (live_market_prices.find(ticker) != live_market_prices.end()) {
-                if (action == "BUY") live_market_prices[ticker].volume -= qty;
-                else if (action == "SELL") live_market_prices[ticker].volume += qty;
-                replayed++;
-            }
-        } catch (...) {}
-    }
-    wal.close();
-    if (replayed > 0) std::cout << "[WAL REPLAY] Recovered " << replayed << " pending trades." << std::endl;
-}
 
 // ---------- legacy sync helper (still used by cancel path) ----------
 inline void log_trade_history(const TradeRecord& trade) {
