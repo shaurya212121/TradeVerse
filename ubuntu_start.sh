@@ -4,6 +4,8 @@ echo " TradeVerse — Ubuntu Auto-Setup"
 echo "========================================"
 echo ""
 
+cd backend || exit 1
+
 echo "[SETUP] Installing Ubuntu dependencies (you may be asked for your password)..."
 sudo apt-get update
 sudo apt-get install -y build-essential libzmq3-dev python3-pip
