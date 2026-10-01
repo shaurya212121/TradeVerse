@@ -28,14 +28,16 @@ PRICE = get_spread_prices(send_cmd(sock, f"ORDERBOOK:{TEST_TICKER}"))
 
 print("\n=== TEST: MULTI-LEVEL FILL (WALKING THE BOOK) ===")
 # Two small sellers at different prices
-send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:50:{PRICE:.2f}")
-send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:50:{PRICE + 0.50:.2f}")
+r1 = send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:50:{PRICE:.2f}")
+r2 = send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:50:{PRICE + 0.50:.2f}")
+print("Sell 1:", r1)
+print("Sell 2:", r2)
 time.sleep(0.1)
 
 # One big buyer sweeps both levels
 reply = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:100:{PRICE + 0.50:.2f}")
 
 if "FILLED" in reply and "100" in reply:
-    print("✅ PASS: Order correctly walked the book and consumed two price levels.\n")
+    print("OK PASS: Order correctly walked the book and consumed two price levels.\n")
 else:
-    print(f"❌ FAIL: Expected FILLED, got {reply.strip()}\n")
+    print(f"X FAIL: Expected FILLED, got {reply.strip()}\n")
