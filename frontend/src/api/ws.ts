@@ -26,10 +26,12 @@ export function connectWebSocket() {
         const timestamp = data.timestamp || Date.now();
         const prevData = store.prices[data.ticker];
         
+        const change = prevData ? data.price - prevData.price : 0;
         store.updatePrice({
           ticker: data.ticker,
           price: data.price,
-          change: prevData ? data.price - prevData.price : 0,
+          change,
+          changePct: prevData && prevData.price > 0 ? (change / prevData.price) * 100 : 0,
           timestamp
         });
       } else if (data.type === 'ORDERBOOK') {
