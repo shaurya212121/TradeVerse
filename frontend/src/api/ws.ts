@@ -36,6 +36,9 @@ export function connectWebSocket() {
         });
       } else if (data.type === 'ORDERBOOK') {
         store.setOrderBook(data.data as OrderBookSnapshot);
+      } else if (data.type === 'PORTFOLIO') {
+        store.setCash(data.cash);
+        store.setPortfolio(data.holdings);
       }
     } catch (e) {
       console.error('Error parsing WS message', e);

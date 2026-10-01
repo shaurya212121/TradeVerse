@@ -8,6 +8,8 @@ interface MarketState {
   orderBook: OrderBookSnapshot | null;
   tradeHistory: TradeLogEntry[];
   portfolio: PortfolioPosition[];
+  cash: number;
+  
   
   setActiveTicker: (ticker: Ticker) => void;
   setConnectionStatus: (status: 'connected' | 'connecting' | 'offline') => void;
@@ -15,6 +17,7 @@ interface MarketState {
   setOrderBook: (ob: OrderBookSnapshot) => void;
   addTradeLog: (log: TradeLogEntry) => void;
   setPortfolio: (port: PortfolioPosition[]) => void;
+  setCash: (cash: number) => void;
 }
 
 export const useMarketStore = create<MarketState>((set) => ({
@@ -27,6 +30,7 @@ export const useMarketStore = create<MarketState>((set) => ({
   orderBook: null,
   tradeHistory: [],
   portfolio: [],
+  cash: 0,
 
   setActiveTicker: (ticker) => set({ activeTicker: ticker }),
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -38,4 +42,5 @@ export const useMarketStore = create<MarketState>((set) => ({
     tradeHistory: [log, ...state.tradeHistory].slice(0, 50) // keep last 50
   })),
   setPortfolio: (port) => set({ portfolio: port }),
+  setCash: (cash) => set({ cash }),
 }));
