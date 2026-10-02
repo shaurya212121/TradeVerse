@@ -28,13 +28,27 @@ export const OrderEntryForm: React.FC = () => {
       setFeedback({ msg: res.message, isError: !res.success });
       
       if (res.success && orderType === 'MARKET') {
-        // Automatically log to our mock history for now
+        // Parse actual execution price and qty from the engine response
+        // e.g. "SUCCESS | Bought 10 AAPL @ $150.23"
+        let execPrice = useMarketStore.getState().prices[activeTicker]?.price || 0;
+        let execQty = parseInt(qty, 10);
+        
+        const priceMatch = res.message.match(/\$([0-9.]+)/);
+        if (priceMatch && priceMatch[1]) {
+          execPrice = parseFloat(priceMatch[1]);
+        }
+        
+        const qtyMatch = res.message.match(/(?:Bought|Sold)\s+([0-9]+)/);
+        if (qtyMatch && qtyMatch[1]) {
+          execQty = parseInt(qtyMatch[1], 10);
+        }
+
         useMarketStore.getState().addTradeLog({
           tradeId: Math.floor(Math.random() * 100000),
           ticker: activeTicker,
           side,
-          qty: parseInt(qty, 10),
-          price: useMarketStore.getState().prices[activeTicker]?.price || 0,
+          qty: execQty,
+          price: execPrice,
           timestamp: Date.now()
         });
       }

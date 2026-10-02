@@ -2,63 +2,17 @@ import zmq
 import sys
 import re
 import time
-
-# ── Portfolio integration ────────────────────────────────────────────────────
-from portfolio import setup_db, register_client, record_trade, get_portfolio, get_holding_qty
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def parse_price_from_response(response: str) -> float | None:
-    """
-    Extract the execution price from a server SUCCESS response.
-    Expected format: 'SUCCESS | Bought 10 AAPL @ $150.23'
-                  or 'SUCCESS | Sold 5 TSLA @ $220.00'
-    Returns the price as a float, or None if it cannot be parsed.
-    """
-    match = re.search(r"\$([0-9]+\.[0-9]+)", response)
-    if match:
-        return float(match.group(1))
-    return None
-def handle_trade_response(client_id: str, command: str, response: str) -> None:
-    """
-    If the server confirms a BUY or SELL, mirror it into the local SQLite portfolio.
-    command  — raw user input, e.g. 'BUY:AAPL:10'
-    response — server reply,   e.g. 'SUCCESS | Bought 10 AAPL @ $150.23'
-    """
-    if not response.startswith("SUCCESS"):
-        return                          # rejected or error — nothing to record
-
-    parts = command.strip().split(":")
-    if len(parts) < 3:
-        return                          # malformed command, skip
-
-    action  = parts[0].upper()         # BUY or SELL
-    ticker  = parts[1].upper()
-    try:
-        quantity = int(parts[2])
-    except ValueError:
-        return
-
-    price = parse_price_from_response(response)
-    if price is None:
-        print("[Portfolio] Warning: could not parse execution price from server response.")
-        return
-
-    record_trade(client_id, action, ticker, quantity, price)
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
+import uuid
 
 def main():
-    # ── Bootstrap local DB ───────────────────────────────────────────────────
-    setup_db()
-
+    print("=" * 64)
+    print("  TRADEVERSE TERMINAL")
+    print("=" * 64)
+    
     client_id = input("Enter your Client ID (e.g. shaurya): ").strip()
     if not client_id:
         client_id = "default"
-    register_client(client_id)
-    print(f"Logged in as: {client_id}\n")
-
+    
     # ── ZeroMQ connection ────────────────────────────────────────────────────
     context = zmq.Context()
 
@@ -66,7 +20,17 @@ def main():
     socket = context.socket(zmq.REQ)
     socket.setsockopt(zmq.RCVTIMEO, 8000)          # 8 s timeout — never hang
     socket.connect("tcp://localhost:5556")
-    print("Connected! System ready for trading.\n")
+    
+    # ── Register Account ─────────────────────────────────────────────────────
+    socket.send_string(f"REGISTER:{client_id}")
+    try:
+        resp = socket.recv_string()
+        print(f"[Server] {resp}")
+    except zmq.Again:
+        print("[TIMEOUT] Server offline. Exiting.")
+        sys.exit(1)
+        
+    print("\nConnected! System ready for trading.\n")
     print("=" * 64)
     print("  TRADEVERSE — COMMAND REFERENCE")
     print("=" * 64)
@@ -83,8 +47,8 @@ def main():
     print("  QUERY COMMANDS:")
     print("    FETCH:<TICKER>         Get live price + book info (e.g., FETCH:AAPL)")
     print("    ORDERBOOK:<TICKER>     View order book depth     (e.g., ORDERBOOK:AAPL)")
-    print("    PORTFOLIO              View all assets + liquidity (server view)")
-    print("    MY_PORTFOLIO           View YOUR personal holdings (local SQLite)")
+    print("    MY_ACCOUNT             View your cash and holdings")
+    print("    PORTFOLIO              View all market assets")
     print("    HISTORY                Recent trade log")
     print("    STATUS_CHECK           Server health")
     print()
@@ -94,33 +58,30 @@ def main():
 
     while True:
         try:
-            command = input("Trade Terminal > ").strip()
+            raw_command = input("Trade Terminal > ").strip()
 
-            if not command:
+            if not raw_command:
                 continue
 
-            if command.lower() == "exit":
+            if raw_command.lower() == "exit":
                 print("Exiting trading terminal...")
                 break
 
-            # ── Local portfolio shortcut (no server round-trip needed) ────────
-            if command.upper() == "MY_PORTFOLIO":
-                print(get_portfolio(client_id))
-                continue
-
-            # ── Short-sell guard: block sells that exceed holdings ─────────
-            parts = command.strip().split(":")
-            if len(parts) >= 3 and parts[0].upper() == "SELL":
-                sell_ticker = parts[1].upper()
-                try:
-                    sell_qty = int(parts[2])
-                except ValueError:
-                    sell_qty = 0
-                owned = get_holding_qty(client_id, sell_ticker)
-                if sell_qty > owned:
-                    print(f"\n[REJECTED] You own {owned} shares of {sell_ticker} "
-                          f"but tried to sell {sell_qty}. Short selling is not allowed.\n")
-                    continue
+            # Process command
+            command = raw_command
+            parts = command.split(":")
+            
+            # Map MY_ACCOUNT to ACCOUNT:client_id
+            if command.upper() == "MY_ACCOUNT":
+                command = f"ACCOUNT:{client_id}"
+            
+            # Inject Client ID and Request ID into MARKET orders for idempotency
+            elif len(parts) >= 3 and parts[0].upper() in ("BUY", "SELL"):
+                action = parts[0].upper()
+                ticker = parts[1].upper()
+                qty = parts[2]
+                req_id = str(uuid.uuid4())
+                command = f"{action}:{client_id}:{ticker}:{qty}:{req_id}"
 
             # ── Send command to C++ backend via ZeroMQ ────────────────────────
             start_time = time.perf_counter()
@@ -131,11 +92,6 @@ def main():
                 end_time = time.perf_counter()
                 rtt_ms = (end_time - start_time) * 1000
                 print(f"\n[Server Response] (Total RTT: {rtt_ms:.2f} ms):\n{response}\n")
-
-                # Mirror confirmed BUY / SELL into local SQLite portfolio
-                action = command.split(":")[0].upper()
-                if action in ("BUY", "SELL"):
-                    handle_trade_response(client_id, command, response)
 
             except zmq.Again:
                 print("\n[TIMEOUT] Server did not respond in 8 seconds.")
@@ -155,7 +111,6 @@ def main():
 
     socket.close()
     context.term()
-
 
 if __name__ == "__main__":
     main()

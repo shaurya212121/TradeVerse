@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <map>
-#include <deque>
+#include <list>
 #include <queue>
 #include <mutex>
 #include <condition_variable>
@@ -24,8 +24,8 @@ struct Order {
 };
 
 struct OrderBook {
-    std::map<double, std::deque<Order>, std::greater<double>> bids;
-    std::map<double, std::deque<Order>>                       asks;
+    std::map<double, std::list<Order>, std::greater<double>> bids;
+    std::map<double, std::list<Order>>                       asks;
 };
 
 struct OrderRequest {
@@ -54,23 +54,43 @@ inline std::unordered_map<std::string, OrderBook>   order_books;
 inline std::unordered_map<std::string, TickerShard> shards;      // one per ticker
 inline std::atomic<int> next_order_id{1};
 
-// order_id → ticker: lets CANCEL_ORDER route to the right shard without a global search
-inline std::unordered_map<int, std::string> order_ticker_map;
-inline std::mutex order_ticker_map_lock;
+// ============================================================================
+//  O(1) CANCEL INDEX
+//  Maps order_id → { ticker, price, side, list::iterator }
+//  Lets CANCEL_ORDER erase in O(1) without scanning the book.
+// ============================================================================
+
+struct OrderLocation {
+    std::string ticker;
+    double price;
+    std::string side;   // "BID" or "ASK"
+    std::list<Order>::iterator it;
+};
+
+inline std::unordered_map<int, OrderLocation> order_location_map;
+inline std::mutex order_location_map_lock;
 
 const int ORDERBOOK_DISPLAY_DEPTH = 10;
 
 // ============================================================================
-//  HELPERS — register / unregister order IDs for cancel routing
+//  HELPERS — register / unregister order locations for O(1) cancel
 // ============================================================================
 
-inline void register_order_id(int oid, const std::string& ticker) {
-    std::lock_guard<std::mutex> lk(order_ticker_map_lock);
-    order_ticker_map[oid] = ticker;
+inline void register_order_location(int oid, const std::string& ticker, double price,
+                                     const std::string& side, std::list<Order>::iterator it) {
+    std::lock_guard<std::mutex> lk(order_location_map_lock);
+    order_location_map[oid] = {ticker, price, side, it};
 }
 inline void unregister_order_id(int oid) {
-    std::lock_guard<std::mutex> lk(order_ticker_map_lock);
-    order_ticker_map.erase(oid);
+    std::lock_guard<std::mutex> lk(order_location_map_lock);
+    order_location_map.erase(oid);
+}
+// Legacy helper — used by seed_orderbook (no iterator available yet at push_back time)
+inline void register_order_id(int oid, const std::string& ticker) {
+    // Seed-time only: we don't need cancel support for synthetic orders,
+    // but we register a placeholder so submit_order_request routing works.
+    std::lock_guard<std::mutex> lk(order_location_map_lock);
+    order_location_map[oid] = {ticker, 0.0, "", {}};
 }
 // ============================================================================
 //  SEED ORDER BOOK  (called once per ticker at startup, before threads start)
@@ -123,8 +143,6 @@ inline int get_sellable_qty(const std::string& ticker) {
 
 // ============================================================================
 //  LOCK-FREE READ HELPERS — caller MUST already hold shard.book_lock
-//  These exist to avoid deadlock when execute_trade() grabs book_lock
-//  and then needs to check liquidity.
 // ============================================================================
 
 inline int get_buyable_qty_unsafe(const std::string& ticker) {
@@ -185,8 +203,14 @@ inline std::string get_orderbook_display(const std::string& ticker, int depth = 
 // ============================================================================
 //  PROCESS LIMIT ORDER  (called from each ticker's own processor thread)
 //  Acquires only this ticker's book_lock — other tickers run in parallel.
+//
+//  IOC mode (Immediate-Or-Cancel):  When ioc=true, any unfilled remainder
+//  is discarded instead of resting in the book.  Market orders use this path
+//  with an aggressive price (DBL_MAX for buys, 0.01 for sells) so they
+//  naturally walk the entire book and fill at VWAP.
 // ============================================================================
-inline std::string process_limit_order(const std::string& side, const std::string& ticker, int qty, double price) {
+inline std::string process_limit_order(const std::string& side, const std::string& ticker,
+                                       int qty, double price, bool ioc = false) {
     if (!shards.count(ticker)) return "REJECTED | No order book for '" + ticker + "'.";
     int new_oid   = 0;
     int original  = qty, filled = 0;
@@ -209,9 +233,14 @@ inline std::string process_limit_order(const std::string& side, const std::strin
                 }
                 if (q.empty()) book.asks.erase(it);
             }
-            if (qty > 0) {
+            // Rest unfilled quantity in book — unless IOC mode
+            if (qty > 0 && !ioc) {
                 new_oid = next_order_id.fetch_add(1);
                 book.bids[price].push_back({new_oid, "BID", ticker, qty, price, ts, false});
+                // Register iterator for O(1) cancel
+                auto& lvl = book.bids[price];
+                auto last_it = std::prev(lvl.end());
+                register_order_location(new_oid, ticker, price, "BID", last_it);
             }
         } else {
             while (qty > 0 && !book.bids.empty()) {
@@ -226,15 +255,22 @@ inline std::string process_limit_order(const std::string& side, const std::strin
                 }
                 if (q.empty()) book.bids.erase(it);
             }
-            if (qty > 0) {
+            // Rest unfilled quantity in book — unless IOC mode
+            if (qty > 0 && !ioc) {
                 new_oid = next_order_id.fetch_add(1);
                 book.asks[price].push_back({new_oid, "ASK", ticker, qty, price, ts, false});
+                // Register iterator for O(1) cancel
+                auto& lvl = book.asks[price];
+                auto last_it = std::prev(lvl.end());
+                register_order_location(new_oid, ticker, price, "ASK", last_it);
             }
         }
     } // book_lock released here
 
-    // Register resting order ID outside book_lock (safe — client doesn't have the ID yet)
-    if (new_oid > 0) register_order_id(new_oid, ticker);
+    if (qty > 0 && !ioc) {
+        std::string act = (side == "BID") ? "LIMIT_BUY" : "LIMIT_SELL";
+        wal_log(act, ticker, qty, price);
+    }
 
     // Log filled portion + price discovery: executed fill price becomes the market price
     if (filled > 0) {
@@ -245,12 +281,7 @@ inline std::string process_limit_order(const std::string& side, const std::strin
         log_trade_history({next_trade_id.fetch_add(1), act, ticker, filled, avg_fill, ts, false});
         // ── PRICE DISCOVERY ──────────────────────────────────────────────────
         // The price at which orders actually matched in the book is now the
-        // official market price. This is what gets broadcast to the dashboard
-        // via the publisher on port 5555 — bots now move prices, not the RNG.
-        // Fix 4: use per-ticker price lock — consistent with execute_trade ordering.
-        // book_lock is already held above; we then take price_lock inside, same order
-        // as execute_trade.  market_lock is NOT taken, so this doesn't serialize with
-        // trades on other tickers.
+        // official market price for broadcast on port 5555.
         if (ticker_price_locks.count(ticker)) {
             std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
             if (live_market_prices.count(ticker)) {
@@ -260,45 +291,109 @@ inline std::string process_limit_order(const std::string& side, const std::strin
         }
     }
 
+    // Build response
     std::ostringstream oss;
-    if (filled == original)    oss << "FILLED  | " << side << " " << filled << " " << ticker << " fully filled @ avg $" << std::fixed << std::setprecision(2) << (fill_val / filled);
-    else if (filled > 0)       oss << "PARTIAL | " << side << " " << filled << "/" << original << " " << ticker << " filled | " << qty << " resting @ $" << price;
-    else                       oss << "RESTING | " << side << " " << original << " " << ticker << " placed in book @ $" << price << " (order #" << new_oid << ")";
+    oss << std::fixed << std::setprecision(2);
+    if (ioc) {
+        // Market order (IOC) response format
+        if (filled == original) {
+            double avg = fill_val / filled;
+            std::string verb = (side == "BID") ? "Bought" : "Sold";
+            oss << "SUCCESS | " << verb << " " << filled << " " << ticker
+                << " @ $" << avg << " (VWAP, " << filled << " shares across book)";
+        } else if (filled > 0) {
+            double avg = fill_val / filled;
+            std::string verb = (side == "BID") ? "Bought" : "Sold";
+            oss << "PARTIAL | " << verb << " " << filled << "/" << original
+                << " " << ticker << " @ $" << avg << " | " << qty << " unfilled (no liquidity)";
+        } else {
+            oss << "REJECTED | Insufficient " << ((side == "BID") ? "ask" : "bid")
+                << "-side liquidity for " << ticker << "!";
+        }
+    } else {
+        // Limit order response format (unchanged)
+        if (filled == original)    oss << "FILLED  | " << side << " " << filled << " " << ticker << " fully filled @ avg $" << (fill_val / filled);
+        else if (filled > 0)       oss << "PARTIAL | " << side << " " << filled << "/" << original << " " << ticker << " filled | " << qty << " resting @ $" << price;
+        else                       oss << "RESTING | " << side << " " << original << " " << ticker << " placed in book @ $" << price << " (order #" << new_oid << ")";
+    }
     return oss.str();
 }
 
 // ============================================================================
-//  PROCESS CANCEL ORDER  (routed to the correct ticker's shard via order_ticker_map)
+//  PROCESS CANCEL ORDER — O(1) via order_location_map
+//  Looks up the order's exact position in the book and erases directly.
 // ============================================================================
 
 inline std::string process_cancel_order(const std::string& ticker, int order_id) {
     if (!shards.count(ticker)) return "REJECTED | Order #" + std::to_string(order_id) + " not found.";
+
+    OrderLocation loc;
+    {
+        std::lock_guard<std::mutex> lk(order_location_map_lock);
+        auto map_it = order_location_map.find(order_id);
+        if (map_it == order_location_map.end())
+            return "REJECTED | Order #" + std::to_string(order_id) + " not found.";
+        loc = map_it->second;
+    }
+
+    // Verify ticker matches (should always match if routing is correct)
+    if (loc.ticker != ticker)
+        return "REJECTED | Order #" + std::to_string(order_id) + " not found in " + ticker + " book.";
+
+    // If this was a seed-time placeholder (side is empty), fall back to linear scan
+    if (loc.side.empty()) {
+        std::lock_guard<std::mutex> bk(shards[ticker].book_lock);
+        auto& book = order_books[ticker];
+        for (auto& [price, orders] : book.bids) {
+            for (auto it = orders.begin(); it != orders.end(); ++it) {
+                if (it->order_id == order_id) {
+                    std::string info = "SUCCESS | Cancelled BID order #" + std::to_string(order_id) + " (" + ticker + ")";
+                    orders.erase(it);
+                    if (orders.empty()) book.bids.erase(price);
+                    unregister_order_id(order_id);
+                    return info;
+                }
+            }
+        }
+        for (auto& [price, orders] : book.asks) {
+            for (auto it = orders.begin(); it != orders.end(); ++it) {
+                if (it->order_id == order_id) {
+                    std::string info = "SUCCESS | Cancelled ASK order #" + std::to_string(order_id) + " (" + ticker + ")";
+                    orders.erase(it);
+                    if (orders.empty()) book.asks.erase(price);
+                    unregister_order_id(order_id);
+                    return info;
+                }
+            }
+        }
+        return "REJECTED | Order #" + std::to_string(order_id) + " not found in " + ticker + " book.";
+    }
+
+    // O(1) cancel path: we know the exact side, price, and iterator
     std::lock_guard<std::mutex> bk(shards[ticker].book_lock);
     auto& book = order_books[ticker];
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
 
-    for (auto& [price, orders] : book.bids) {
-        for (auto it = orders.begin(); it != orders.end(); ++it) {
-            if (it->order_id == order_id) {
-                std::string info = "SUCCESS | Cancelled BID order #" + std::to_string(order_id) + " (" + ticker + " @ $" + std::to_string(price) + ")";
-                orders.erase(it);
-                if (orders.empty()) book.bids.erase(price);
-                unregister_order_id(order_id);
-                return info;
-            }
+    if (loc.side == "BID") {
+        auto lvl_it = book.bids.find(loc.price);
+        if (lvl_it != book.bids.end()) {
+            lvl_it->second.erase(loc.it);
+            if (lvl_it->second.empty()) book.bids.erase(lvl_it);
         }
-    }
-    for (auto& [price, orders] : book.asks) {
-        for (auto it = orders.begin(); it != orders.end(); ++it) {
-            if (it->order_id == order_id) {
-                std::string info = "SUCCESS | Cancelled ASK order #" + std::to_string(order_id) + " (" + ticker + " @ $" + std::to_string(price) + ")";
-                orders.erase(it);
-                if (orders.empty()) book.asks.erase(price);
-                unregister_order_id(order_id);
-                return info;
-            }
+        wal_log("CANCEL_ORDER", ticker, order_id, 0.0);
+        oss << "SUCCESS | Cancelled BID order #" << order_id << " (" << ticker << " @ $" << loc.price << ")";
+    } else {
+        auto lvl_it = book.asks.find(loc.price);
+        if (lvl_it != book.asks.end()) {
+            lvl_it->second.erase(loc.it);
+            if (lvl_it->second.empty()) book.asks.erase(lvl_it);
         }
+        wal_log("CANCEL_ORDER", ticker, order_id, 0.0);
+        oss << "SUCCESS | Cancelled ASK order #" << order_id << " (" << ticker << " @ $" << loc.price << ")";
     }
-    return "REJECTED | Order #" + std::to_string(order_id) + " not found in " + ticker + " book.";
+    unregister_order_id(order_id);
+    return oss.str();
 }
 
 // ============================================================================
@@ -321,6 +416,8 @@ inline void ticker_processor_thread(std::string ticker) {
             std::string res;
             if      (req->type == "LIMIT_BUY")    res = process_limit_order("BID", ticker, req->qty, req->price);
             else if (req->type == "LIMIT_SELL")   res = process_limit_order("ASK", ticker, req->qty, req->price);
+            else if (req->type == "MARKET_BUY")   res = process_limit_order("BID", ticker, req->qty, req->price, true);
+            else if (req->type == "MARKET_SELL")  res = process_limit_order("ASK", ticker, req->qty, req->price, true);
             else if (req->type == "CANCEL_ORDER") res = process_cancel_order(ticker, req->order_id);
             else res = "REJECTED | Unknown order type.";
             req->result_promise.set_value(res);
@@ -344,11 +441,11 @@ inline std::string submit_order_request(const std::string& type, const std::stri
 
     // For cancel: look up which ticker this order belongs to
     if (type == "CANCEL_ORDER") {
-        std::lock_guard<std::mutex> lk(order_ticker_map_lock);
-        auto it = order_ticker_map.find(order_id);
-        if (it == order_ticker_map.end())
+        std::lock_guard<std::mutex> lk(order_location_map_lock);
+        auto it = order_location_map.find(order_id);
+        if (it == order_location_map.end())
             return "REJECTED | Order #" + std::to_string(order_id) + " not found.";
-        ticker = it->second;
+        ticker = it->second.ticker;
     }
 
     if (!shards.count(ticker))
@@ -364,4 +461,120 @@ inline std::string submit_order_request(const std::string& type, const std::stri
     }
     shards[ticker].cv.notify_one();
     return fut.get();
+}
+
+// ============================================================================
+//  WAL REPLAY (runs once at startup, before threads)
+// ============================================================================
+inline void replay_wal() {
+    std::ifstream wal(WAL_FILE);
+    if (!wal.is_open()) return; 
+
+    std::string line;
+    int replayed = 0;
+    int corrupted = 0;
+
+    while (std::getline(wal, line)) {
+        line = trim(line);
+        if (line.empty()) continue;
+
+        // New format: ACTION|TICKER|QTY|PRICE|TIMESTAMP|CRC32HEX
+        // Find last '|' to extract checksum
+        auto last_pipe = line.rfind('|');
+        if (last_pipe == std::string::npos) {
+            corrupted++;
+            std::cerr << "[WAL REPLAY] Malformed line (no pipe), skipping.\n";
+            continue;
+        }
+
+        std::string payload   = line.substr(0, last_pipe);
+        std::string checksum  = line.substr(last_pipe + 1);
+
+        // Verify CRC32 integrity
+        if (checksum.size() == 8 && !verify_crc32(payload, checksum)) {
+            corrupted++;
+            std::cerr << "[WAL REPLAY] CRC32 MISMATCH — corrupted entry, skipping: " << payload << "\n";
+            continue;
+        }
+
+        // If no checksum (old format), still try to replay for backward compatibility
+        std::string parse_str = (checksum.size() == 8) ? payload : line;
+
+        std::stringstream ss(parse_str);
+        std::string action, ticker, qty_str, price_str, timestamp;
+        std::getline(ss, action, '|');
+        std::getline(ss, ticker, '|');
+        std::getline(ss, qty_str, '|');
+        std::getline(ss, price_str, '|');
+        std::getline(ss, timestamp, '|');
+        try {
+            int qty = std::stoi(qty_str);
+            double price = std::stod(price_str);
+
+            if (action == "BUY" || action == "SELL") {
+                // Market trade volume adjustment
+                if (live_market_prices.find(ticker) != live_market_prices.end()) {
+                    if (action == "BUY") live_market_prices[ticker].volume -= qty;
+                    else if (action == "SELL") live_market_prices[ticker].volume += qty;
+                    replayed++;
+                }
+            } else if (action == "LIMIT_BUY" || action == "LIMIT_SELL") {
+                // Directly reconstruct the order book
+                if (order_books.find(ticker) != order_books.end()) {
+                    int new_oid = next_order_id.fetch_add(1);
+                    if (action == "LIMIT_BUY") {
+                        order_books[ticker].bids[price].push_back({new_oid, "BID", ticker, qty, price, timestamp, false});
+                        auto& lvl = order_books[ticker].bids[price];
+                        auto last_it = std::prev(lvl.end());
+                        register_order_location(new_oid, ticker, price, "BID", last_it);
+                    } else {
+                        order_books[ticker].asks[price].push_back({new_oid, "ASK", ticker, qty, price, timestamp, false});
+                        auto& lvl = order_books[ticker].asks[price];
+                        auto last_it = std::prev(lvl.end());
+                        register_order_location(new_oid, ticker, price, "ASK", last_it);
+                    }
+                    replayed++;
+                }
+            } else if (action == "CANCEL_ORDER") {
+                // The order_id was logged in the 'qty' field for cancels
+                int order_id = qty;
+                // Replay cancel
+                OrderLocation loc;
+                bool found = false;
+                {
+                    std::lock_guard<std::mutex> lk(order_location_map_lock);
+                    auto map_it = order_location_map.find(order_id);
+                    if (map_it != order_location_map.end()) {
+                        loc = map_it->second;
+                        found = true;
+                    }
+                }
+                if (found && loc.ticker == ticker && order_books.find(ticker) != order_books.end()) {
+                    auto& book = order_books[ticker];
+                    if (loc.side == "BID") {
+                        auto lvl_it = book.bids.find(loc.price);
+                        if (lvl_it != book.bids.end()) {
+                            lvl_it->second.erase(loc.it);
+                            if (lvl_it->second.empty()) book.bids.erase(lvl_it);
+                        }
+                    } else {
+                        auto lvl_it = book.asks.find(loc.price);
+                        if (lvl_it != book.asks.end()) {
+                            lvl_it->second.erase(loc.it);
+                            if (lvl_it->second.empty()) book.asks.erase(lvl_it);
+                        }
+                    }
+                    unregister_order_id(order_id);
+                    replayed++;
+                }
+            }
+        } catch (...) {
+            corrupted++;
+        }
+    }
+    wal.close();
+    if (replayed > 0)
+        std::cout << "[WAL REPLAY] Recovered " << replayed << " entries." << std::endl;
+    if (corrupted > 0)
+        std::cerr << "[WAL REPLAY] WARNING: " << corrupted << " corrupted/invalid entries skipped." << std::endl;
 }
