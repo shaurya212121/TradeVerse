@@ -284,6 +284,13 @@ inline std::string process_limit_order(const std::string& side, const std::strin
     // Log filled portion + price discovery: executed fill price becomes the market price
     if (filled > 0) {
         double avg_fill = fill_val / filled;
+
+        // NEW FIX: Settle the limit order aggressor mid-match so they get their shares/cash
+        if (!ioc && !client_id_agg.empty()) {
+            if (side == "BID") settle_buy(client_id_agg, ticker, filled, avg_fill, price);
+            else               settle_sell(client_id_agg, ticker, filled, avg_fill, filled);
+        }
+
         std::string act = (side == "BID") ? "BUY" : "SELL";
         wal_log(act, ticker, filled, avg_fill);
         dirty_flag.store(true);
