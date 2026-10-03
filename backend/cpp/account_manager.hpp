@@ -59,6 +59,8 @@ inline std::string validate_buy(const std::string& client_id, const std::string&
             << " but have $" << it->second.cash << ".";
         return oss.str();
     }
+    // FIX: Atomically reserve the cash to prevent TOCTOU double-spend bugs!
+    it->second.cash -= cost;
     return "";  // empty = OK
 }
 
@@ -76,6 +78,8 @@ inline std::string validate_sell(const std::string& client_id, const std::string
         return "REJECTED | You own " + std::to_string(owned) + " shares of " + ticker +
                " but tried to sell " + std::to_string(qty) + ". Short selling not allowed.";
     }
+    // FIX: Atomically reserve the shares
+    it->second.holdings[ticker] -= qty;
     return "";  // empty = OK
 }
 
@@ -83,25 +87,50 @@ inline std::string validate_sell(const std::string& client_id, const std::string
 // Called AFTER the engine confirms a trade executed successfully.
 
 inline void settle_buy(const std::string& client_id, const std::string& ticker,
-                       int qty, double exec_price) {
+                       int qty, double exec_price, double estimated_price_reserved) {
     std::lock_guard<std::mutex> lk(accounts_lock);
     auto it = accounts.find(client_id);
     if (it == accounts.end()) return;
 
-    it->second.cash -= qty * exec_price;
+    double actual_cost = qty * exec_price;
+    double original_reserved = qty * estimated_price_reserved;
+    
+    // Refund any unused cash from the reservation (e.g. if we got a better VWAP price)
+    it->second.cash += (original_reserved - actual_cost);
     it->second.holdings[ticker] += qty;
 }
 
 inline void settle_sell(const std::string& client_id, const std::string& ticker,
-                        int qty, double exec_price) {
+                        int qty, double exec_price, int qty_reserved) {
     std::lock_guard<std::mutex> lk(accounts_lock);
     auto it = accounts.find(client_id);
     if (it == accounts.end()) return;
 
+    // Shares were already reserved/deducted during validation.
+    // If the order was only partially filled, refund the un-sold shares.
+    int unfilled = qty_reserved - qty;
+    if (unfilled > 0) {
+        it->second.holdings[ticker] += unfilled;
+    }
+
     it->second.cash += qty * exec_price;
-    it->second.holdings[ticker] -= qty;
     if (it->second.holdings[ticker] <= 0)
         it->second.holdings.erase(ticker);
+}
+
+// ── Refund on Total Rejection ─────────────────────────────────────────────────
+inline void refund_buy(const std::string& client_id, int qty, double estimated_price) {
+    std::lock_guard<std::mutex> lk(accounts_lock);
+    auto it = accounts.find(client_id);
+    if (it == accounts.end()) return;
+    it->second.cash += (qty * estimated_price);
+}
+
+inline void refund_sell(const std::string& client_id, const std::string& ticker, int qty) {
+    std::lock_guard<std::mutex> lk(accounts_lock);
+    auto it = accounts.find(client_id);
+    if (it == accounts.end()) return;
+    it->second.holdings[ticker] += qty;
 }
 
 // ── Query ─────────────────────────────────────────────────────────────────────

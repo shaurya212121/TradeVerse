@@ -190,21 +190,29 @@ void chatbox_worker_routine(zmq::context_t* context) {
         // ---- LIMIT ORDERS ----
         else if (client_msg.rfind("LIMIT_BUY:", 0) == 0) {
             std::stringstream ss(client_msg);
-            std::string cmd, ticker, qty_str, price_str;
-            std::getline(ss, cmd, ':'); std::getline(ss, ticker, ':');
-            std::getline(ss, qty_str, ':'); std::getline(ss, price_str, ':');
+            std::string cmd, client_id, ticker, qty_str, price_str;
+            std::getline(ss, cmd, ':'); std::getline(ss, client_id, ':');
+            std::getline(ss, ticker, ':'); std::getline(ss, qty_str, ':'); std::getline(ss, price_str, ':');
             try {
-                reply_msg = submit_order_request("LIMIT_BUY", trim(ticker), std::stoi(trim(qty_str)), std::stod(trim(price_str)));
-            } catch (...) { reply_msg = "REJECTED | Invalid params. Format: LIMIT_BUY:TICKER:QTY:PRICE"; }
+                int qty = std::stoi(trim(qty_str));
+                double price = std::stod(trim(price_str));
+                std::string rejection = validate_buy(trim(client_id), trim(ticker), qty, price);
+                if (!rejection.empty()) reply_msg = rejection;
+                else reply_msg = submit_order_request("LIMIT_BUY", trim(ticker), qty, price, 0, trim(client_id));
+            } catch (...) { reply_msg = "REJECTED | Invalid params. Format: LIMIT_BUY:CLIENT_ID:TICKER:QTY:PRICE"; }
         }
         else if (client_msg.rfind("LIMIT_SELL:", 0) == 0) {
             std::stringstream ss(client_msg);
-            std::string cmd, ticker, qty_str, price_str;
-            std::getline(ss, cmd, ':'); std::getline(ss, ticker, ':');
-            std::getline(ss, qty_str, ':'); std::getline(ss, price_str, ':');
+            std::string cmd, client_id, ticker, qty_str, price_str;
+            std::getline(ss, cmd, ':'); std::getline(ss, client_id, ':');
+            std::getline(ss, ticker, ':'); std::getline(ss, qty_str, ':'); std::getline(ss, price_str, ':');
             try {
-                reply_msg = submit_order_request("LIMIT_SELL", trim(ticker), std::stoi(trim(qty_str)), std::stod(trim(price_str)));
-            } catch (...) { reply_msg = "REJECTED | Invalid params. Format: LIMIT_SELL:TICKER:QTY:PRICE"; }
+                int qty = std::stoi(trim(qty_str));
+                double price = std::stod(trim(price_str));
+                std::string rejection = validate_sell(trim(client_id), trim(ticker), qty);
+                if (!rejection.empty()) reply_msg = rejection;
+                else reply_msg = submit_order_request("LIMIT_SELL", trim(ticker), qty, price, 0, trim(client_id));
+            } catch (...) { reply_msg = "REJECTED | Invalid params. Format: LIMIT_SELL:CLIENT_ID:TICKER:QTY:PRICE"; }
         }
         // ---- ORDER BOOK VIEW ----
         else if (client_msg.rfind("ORDERBOOK:", 0) == 0) {
@@ -261,10 +269,11 @@ void chatbox_worker_routine(zmq::context_t* context) {
                     } else {
                         // Pre-trade risk check
                         std::string rejection;
+                        double est_price = 0.0;
                         if (action == "BUY") {
                             // Estimate price from best ask
                             auto [bid, ask] = get_best_bid_ask(ticker);
-                            double est_price = (ask > 0) ? ask : 999999.0;
+                            est_price = (ask > 0) ? ask : 999999.0;
                             rejection = validate_buy(client_id, ticker, qty, est_price);
                         } else {
                             rejection = validate_sell(client_id, ticker, qty);
@@ -293,12 +302,25 @@ void chatbox_worker_routine(zmq::context_t* context) {
                                         try { filled_qty = std::stoi(reply_msg.substr(sold_pos + 5)); } catch (...) {}
                                     }
                                     if (exec_price > 0 && filled_qty > 0) {
-                                        if (action == "BUY")
-                                            settle_buy(client_id, ticker, filled_qty, exec_price);
-                                        else
-                                            settle_sell(client_id, ticker, filled_qty, exec_price);
+                                        if (action == "BUY") {
+                                            settle_buy(client_id, ticker, filled_qty, exec_price, est_price);
+                                        } else {
+                                            settle_sell(client_id, ticker, filled_qty, exec_price, qty);
+                                        }
+                                    } else {
+                                        // Failed to parse VWAP, refund everything as a fallback
+                                        if (action == "BUY") refund_buy(client_id, qty, est_price);
+                                        else refund_sell(client_id, ticker, qty);
                                     }
+                                } else {
+                                    // Failed to parse VWAP, refund everything as a fallback
+                                    if (action == "BUY") refund_buy(client_id, qty, est_price);
+                                    else refund_sell(client_id, ticker, qty);
                                 }
+                            } else {
+                                // trade REJECTED (e.g. no liquidity), refund
+                                if (action == "BUY") refund_buy(client_id, qty, est_price);
+                                else refund_sell(client_id, ticker, qty);
                             }
                         }
                     }
