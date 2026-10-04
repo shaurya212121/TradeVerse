@@ -8,6 +8,7 @@
 #include <future>
 #include <iostream>
 #include "market_state.hpp"
+#include "account_manager.hpp"
 
 // ============================================================================
 //  STRUCTURES
@@ -21,11 +22,19 @@ struct Order {
     double price;
     std::string timestamp;
     bool is_synthetic;
+    std::string client_id;
 };
 
 struct OrderBook {
     std::map<double, std::list<Order>, std::greater<double>> bids;
     std::map<double, std::list<Order>>                       asks;
+};
+
+struct OrderResult {
+    bool success;
+    int filled;
+    double avg_price;
+    std::string message;
 };
 
 struct OrderRequest {
@@ -34,7 +43,8 @@ struct OrderRequest {
     int qty;
     double price;
     int order_id;
-    std::promise<std::string> result_promise;
+    std::promise<OrderResult> result_promise;
+    std::string client_id;
 };
 
 // ============================================================================
@@ -209,9 +219,9 @@ inline std::string get_orderbook_display(const std::string& ticker, int depth = 
 //  with an aggressive price (DBL_MAX for buys, 0.01 for sells) so they
 //  naturally walk the entire book and fill at VWAP.
 // ============================================================================
-inline std::string process_limit_order(const std::string& side, const std::string& ticker,
-                                       int qty, double price, bool ioc = false) {
-    if (!shards.count(ticker)) return "REJECTED | No order book for '" + ticker + "'.";
+inline OrderResult process_limit_order(const std::string& side, const std::string& ticker,
+                                       int qty, double price, bool ioc = false, const std::string& client_id_agg = "") {
+    if (!shards.count(ticker)) return {false, 0, 0.0, "REJECTED | No order book for '" + ticker + "'."};
     int new_oid   = 0;
     int original  = qty, filled = 0;
     double fill_val = 0.0;
@@ -229,6 +239,9 @@ inline std::string process_limit_order(const std::string& side, const std::strin
                     Order& r = q.front();
                     int f = std::min(qty, r.qty);
                     qty -= f; r.qty -= f; filled += f; fill_val += f * r.price;
+                    
+                    if (!r.client_id.empty()) settle_sell(r.client_id, ticker, f, r.price, f);
+
                     if (r.qty == 0) { unregister_order_id(r.order_id); q.pop_front(); }
                 }
                 if (q.empty()) book.asks.erase(it);
@@ -236,7 +249,7 @@ inline std::string process_limit_order(const std::string& side, const std::strin
             // Rest unfilled quantity in book — unless IOC mode
             if (qty > 0 && !ioc) {
                 new_oid = next_order_id.fetch_add(1);
-                book.bids[price].push_back({new_oid, "BID", ticker, qty, price, ts, false});
+                book.bids[price].push_back({new_oid, "BID", ticker, qty, price, ts, false, client_id_agg});
                 // Register iterator for O(1) cancel
                 auto& lvl = book.bids[price];
                 auto last_it = std::prev(lvl.end());
@@ -251,6 +264,9 @@ inline std::string process_limit_order(const std::string& side, const std::strin
                     Order& r = q.front();
                     int f = std::min(qty, r.qty);
                     qty -= f; r.qty -= f; filled += f; fill_val += f * r.price;
+
+                    if (!r.client_id.empty()) settle_buy(r.client_id, ticker, f, r.price, r.price);
+
                     if (r.qty == 0) { unregister_order_id(r.order_id); q.pop_front(); }
                 }
                 if (q.empty()) book.bids.erase(it);
@@ -258,7 +274,7 @@ inline std::string process_limit_order(const std::string& side, const std::strin
             // Rest unfilled quantity in book — unless IOC mode
             if (qty > 0 && !ioc) {
                 new_oid = next_order_id.fetch_add(1);
-                book.asks[price].push_back({new_oid, "ASK", ticker, qty, price, ts, false});
+                book.asks[price].push_back({new_oid, "ASK", ticker, qty, price, ts, false, client_id_agg});
                 // Register iterator for O(1) cancel
                 auto& lvl = book.asks[price];
                 auto last_it = std::prev(lvl.end());
@@ -275,6 +291,13 @@ inline std::string process_limit_order(const std::string& side, const std::strin
     // Log filled portion + price discovery: executed fill price becomes the market price
     if (filled > 0) {
         double avg_fill = fill_val / filled;
+
+        // NEW FIX: Settle the limit order aggressor mid-match so they get their shares/cash
+        if (!ioc && !client_id_agg.empty()) {
+            if (side == "BID") settle_buy(client_id_agg, ticker, filled, avg_fill, price);
+            else               settle_sell(client_id_agg, ticker, filled, avg_fill, filled);
+        }
+
         std::string act = (side == "BID") ? "BUY" : "SELL";
         wal_log(act, ticker, filled, avg_fill);
         dirty_flag.store(true);
@@ -291,32 +314,28 @@ inline std::string process_limit_order(const std::string& side, const std::strin
         }
     }
 
-    // Build response
+    double avg = (filled > 0) ? (fill_val / filled) : 0.0;
+    bool success = (filled > 0) || (!ioc && qty > 0);
+
+    // Build response message
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
     if (ioc) {
-        // Market order (IOC) response format
         if (filled == original) {
-            double avg = fill_val / filled;
             std::string verb = (side == "BID") ? "Bought" : "Sold";
-            oss << "SUCCESS | " << verb << " " << filled << " " << ticker
-                << " @ $" << avg << " (VWAP, " << filled << " shares across book)";
+            oss << "SUCCESS | " << verb << " " << filled << " " << ticker << " @ $" << avg << " (VWAP, " << filled << " shares across book)";
         } else if (filled > 0) {
-            double avg = fill_val / filled;
             std::string verb = (side == "BID") ? "Bought" : "Sold";
-            oss << "PARTIAL | " << verb << " " << filled << "/" << original
-                << " " << ticker << " @ $" << avg << " | " << qty << " unfilled (no liquidity)";
+            oss << "PARTIAL | " << verb << " " << filled << "/" << original << " " << ticker << " @ $" << avg << " | " << qty << " unfilled (no liquidity)";
         } else {
-            oss << "REJECTED | Insufficient " << ((side == "BID") ? "ask" : "bid")
-                << "-side liquidity for " << ticker << "!";
+            oss << "REJECTED | Insufficient " << ((side == "BID") ? "ask" : "bid") << "-side liquidity for " << ticker << "!";
         }
     } else {
-        // Limit order response format (unchanged)
-        if (filled == original)    oss << "FILLED  | " << side << " " << filled << " " << ticker << " fully filled @ avg $" << (fill_val / filled);
+        if (filled == original)    oss << "FILLED  | " << side << " " << filled << " " << ticker << " fully filled @ avg $" << avg;
         else if (filled > 0)       oss << "PARTIAL | " << side << " " << filled << "/" << original << " " << ticker << " filled | " << qty << " resting @ $" << price;
         else                       oss << "RESTING | " << side << " " << original << " " << ticker << " placed in book @ $" << price << " (order #" << new_oid << ")";
     }
-    return oss.str();
+    return {success, filled, avg, oss.str()};
 }
 
 // ============================================================================
@@ -324,21 +343,21 @@ inline std::string process_limit_order(const std::string& side, const std::strin
 //  Looks up the order's exact position in the book and erases directly.
 // ============================================================================
 
-inline std::string process_cancel_order(const std::string& ticker, int order_id) {
-    if (!shards.count(ticker)) return "REJECTED | Order #" + std::to_string(order_id) + " not found.";
+inline OrderResult process_cancel_order(const std::string& ticker, int order_id) {
+    if (!shards.count(ticker)) return {false, 0, 0.0, "REJECTED | Order #" + std::to_string(order_id) + " not found."};
 
     OrderLocation loc;
     {
         std::lock_guard<std::mutex> lk(order_location_map_lock);
         auto map_it = order_location_map.find(order_id);
         if (map_it == order_location_map.end())
-            return "REJECTED | Order #" + std::to_string(order_id) + " not found.";
+            return {false, 0, 0.0, "REJECTED | Order #" + std::to_string(order_id) + " not found."};
         loc = map_it->second;
     }
 
     // Verify ticker matches (should always match if routing is correct)
     if (loc.ticker != ticker)
-        return "REJECTED | Order #" + std::to_string(order_id) + " not found in " + ticker + " book.";
+        return {false, 0, 0.0, "REJECTED | Order #" + std::to_string(order_id) + " not found in " + ticker + " book."};
 
     // If this was a seed-time placeholder (side is empty), fall back to linear scan
     if (loc.side.empty()) {
@@ -351,7 +370,7 @@ inline std::string process_cancel_order(const std::string& ticker, int order_id)
                     orders.erase(it);
                     if (orders.empty()) book.bids.erase(price);
                     unregister_order_id(order_id);
-                    return info;
+                    return {true, 0, 0.0, info};
                 }
             }
         }
@@ -362,11 +381,11 @@ inline std::string process_cancel_order(const std::string& ticker, int order_id)
                     orders.erase(it);
                     if (orders.empty()) book.asks.erase(price);
                     unregister_order_id(order_id);
-                    return info;
+                    return {true, 0, 0.0, info};
                 }
             }
         }
-        return "REJECTED | Order #" + std::to_string(order_id) + " not found in " + ticker + " book.";
+        return {false, 0, 0.0, "REJECTED | Order #" + std::to_string(order_id) + " not found in " + ticker + " book."};
     }
 
     // O(1) cancel path: we know the exact side, price, and iterator
@@ -378,6 +397,10 @@ inline std::string process_cancel_order(const std::string& ticker, int order_id)
     if (loc.side == "BID") {
         auto lvl_it = book.bids.find(loc.price);
         if (lvl_it != book.bids.end()) {
+            int q = loc.it->qty;
+            std::string cid = loc.it->client_id;
+            if (!cid.empty()) refund_buy(cid, q, loc.price);
+            
             lvl_it->second.erase(loc.it);
             if (lvl_it->second.empty()) book.bids.erase(lvl_it);
         }
@@ -386,6 +409,10 @@ inline std::string process_cancel_order(const std::string& ticker, int order_id)
     } else {
         auto lvl_it = book.asks.find(loc.price);
         if (lvl_it != book.asks.end()) {
+            int q = loc.it->qty;
+            std::string cid = loc.it->client_id;
+            if (!cid.empty()) refund_sell(cid, ticker, q);
+            
             lvl_it->second.erase(loc.it);
             if (lvl_it->second.empty()) book.asks.erase(lvl_it);
         }
@@ -393,7 +420,7 @@ inline std::string process_cancel_order(const std::string& ticker, int order_id)
         oss << "SUCCESS | Cancelled ASK order #" << order_id << " (" << ticker << " @ $" << loc.price << ")";
     }
     unregister_order_id(order_id);
-    return oss.str();
+    return {true, 0, 0.0, oss.str()};
 }
 
 // ============================================================================
@@ -413,18 +440,18 @@ inline void ticker_processor_thread(std::string ticker) {
             shard.queue.pop();
         }
         try {
-            std::string res;
-            if      (req->type == "LIMIT_BUY")    res = process_limit_order("BID", ticker, req->qty, req->price);
-            else if (req->type == "LIMIT_SELL")   res = process_limit_order("ASK", ticker, req->qty, req->price);
-            else if (req->type == "MARKET_BUY")   res = process_limit_order("BID", ticker, req->qty, req->price, true);
-            else if (req->type == "MARKET_SELL")  res = process_limit_order("ASK", ticker, req->qty, req->price, true);
+            OrderResult res;
+            if      (req->type == "LIMIT_BUY")    res = process_limit_order("BID", ticker, req->qty, req->price, false, req->client_id);
+            else if (req->type == "LIMIT_SELL")   res = process_limit_order("ASK", ticker, req->qty, req->price, false, req->client_id);
+            else if (req->type == "MARKET_BUY")   res = process_limit_order("BID", ticker, req->qty, req->price, true, req->client_id);
+            else if (req->type == "MARKET_SELL")  res = process_limit_order("ASK", ticker, req->qty, req->price, true, req->client_id);
             else if (req->type == "CANCEL_ORDER") res = process_cancel_order(ticker, req->order_id);
-            else res = "REJECTED | Unknown order type.";
+            else res = {false, 0, 0.0, "REJECTED | Unknown order type."};
             req->result_promise.set_value(res);
         } catch (const std::exception& e) {
-            try { req->result_promise.set_value(std::string("ERROR | ") + e.what()); } catch (...) {}
+            try { req->result_promise.set_value({false, 0, 0.0, std::string("ERROR | ") + e.what()}); } catch (...) {}
         } catch (...) {
-            try { req->result_promise.set_value("ERROR | Unknown exception in order processor."); } catch (...) {}
+            try { req->result_promise.set_value({false, 0, 0.0, "ERROR | Unknown exception in order processor."}); } catch (...) {}
         }
     }
 }
@@ -435,8 +462,8 @@ inline void ticker_processor_thread(std::string ticker) {
 //  Routes CANCEL_ORDER by looking up which ticker owns that order_id.
 // ============================================================================
 
-inline std::string submit_order_request(const std::string& type, const std::string& ticker_in,
-                                        int qty, double price, int order_id = 0) {
+inline OrderResult submit_order_request(const std::string& type, const std::string& ticker_in,
+                                        int qty, double price, int order_id = 0, const std::string& client_id = "") {
     std::string ticker = ticker_in;
 
     // For cancel: look up which ticker this order belongs to
@@ -444,17 +471,18 @@ inline std::string submit_order_request(const std::string& type, const std::stri
         std::lock_guard<std::mutex> lk(order_location_map_lock);
         auto it = order_location_map.find(order_id);
         if (it == order_location_map.end())
-            return "REJECTED | Order #" + std::to_string(order_id) + " not found.";
+            return {false, 0, 0.0, "REJECTED | Order #" + std::to_string(order_id) + " not found."};
         ticker = it->second.ticker;
     }
 
     if (!shards.count(ticker))
-        return "REJECTED | No shard for '" + ticker + "'.";
+        return {false, 0, 0.0, "REJECTED | No shard for '" + ticker + "'."};
 
     auto req = std::make_shared<OrderRequest>();
     req->type = type; req->ticker = ticker;
     req->qty = qty;   req->price = price; req->order_id = order_id;
-    std::future<std::string> fut = req->result_promise.get_future();
+    req->client_id = client_id;
+    std::future<OrderResult> fut = req->result_promise.get_future();
     {
         std::lock_guard<std::mutex> lg(shards[ticker].queue_lock);
         shards[ticker].queue.push(req);
@@ -577,4 +605,16 @@ inline void replay_wal() {
         std::cout << "[WAL REPLAY] Recovered " << replayed << " entries." << std::endl;
     if (corrupted > 0)
         std::cerr << "[WAL REPLAY] WARNING: " << corrupted << " corrupted/invalid entries skipped." << std::endl;
+
+    // FIX: Recover next_trade_id and next_order_id so they don't reset to 1
+    int max_tid = 0;
+    {
+        std::lock_guard<std::mutex> lk(history_lock);
+        for (const auto& t : trade_history) {
+            if (t.trade_id > max_tid) max_tid = t.trade_id;
+        }
+    }
+    next_trade_id.store(max_tid + 1);
+    // Setting order ID safely above trade IDs to avoid collision with unlogged resting orders
+    next_order_id.store(max_tid + 100000);
 }

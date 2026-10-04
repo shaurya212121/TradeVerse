@@ -42,7 +42,7 @@ def main():
     print("  LIMIT ORDERS (Order Book):")
     print("    LIMIT_BUY:<TICKER>:<QTY>:<PRICE>   Limit buy  (e.g., LIMIT_BUY:AAPL:10:220.50)")
     print("    LIMIT_SELL:<TICKER>:<QTY>:<PRICE>  Limit sell (e.g., LIMIT_SELL:AAPL:5:225.00)")
-    print("    CANCEL_ORDER:<ORDER_ID>             Cancel resting order (e.g., CANCEL_ORDER:7)")
+    print("    CANCEL_ORDER:<ORDER_ID>            Cancel resting order (e.g., CANCEL_ORDER:7)")
     print()
     print("  QUERY COMMANDS:")
     print("    FETCH:<TICKER>         Get live price + book info (e.g., FETCH:AAPL)")
@@ -82,6 +82,14 @@ def main():
                 qty = parts[2]
                 req_id = str(uuid.uuid4())
                 command = f"{action}:{client_id}:{ticker}:{qty}:{req_id}"
+
+            # Inject Client ID into LIMIT orders
+            elif len(parts) >= 4 and parts[0].upper() in ("LIMIT_BUY", "LIMIT_SELL"):
+                action = parts[0].upper()
+                ticker = parts[1].upper()
+                qty = parts[2]
+                price = parts[3]
+                command = f"{action}:{client_id}:{ticker}:{qty}:{price}"
 
             # ── Send command to C++ backend via ZeroMQ ────────────────────────
             start_time = time.perf_counter()
