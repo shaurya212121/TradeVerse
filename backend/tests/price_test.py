@@ -27,14 +27,17 @@ TEST_TICKER = "AAPL"
 PRICE = get_spread_prices(send_cmd(sock, f"ORDERBOOK:{TEST_TICKER}"))
 
 print("\n=== TEST: PRICE PRIORITY CHECK ===")
-r_worse = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:100:{PRICE - 0.10:.2f}")
-r_better = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:100:{PRICE:.2f}")
+send_cmd(sock, "REGISTER:test_user")
+send_cmd(sock, f"BUY:test_user:{TEST_TICKER}:20")
+time.sleep(0.2)
+r_worse = send_cmd(sock, f"LIMIT_BUY:test_user:{TEST_TICKER}:10:{PRICE - 0.10:.2f}")
+r_better = send_cmd(sock, f"LIMIT_BUY:test_user:{TEST_TICKER}:10:{PRICE:.2f}")
 
 id_worse = int(re.search(r"\(order #(\d+)\)", r_worse).group(1))
 id_better = int(re.search(r"\(order #(\d+)\)", r_better).group(1))
 
 # Seller arrives at the worse price. Engine MUST choose Bot B (better deal).
-send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:100:{PRICE - 0.10:.2f}")
+send_cmd(sock, f"LIMIT_SELL:test_user:{TEST_TICKER}:10:{PRICE - 0.10:.2f}")
 time.sleep(0.2)
 
 c_worse = send_cmd(sock, f"CANCEL_ORDER:{id_worse}")

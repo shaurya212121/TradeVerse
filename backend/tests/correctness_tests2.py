@@ -1,4 +1,4 @@
-﻿import zmq
+import zmq
 import time
 import re
 import threading
@@ -67,31 +67,36 @@ print(f"Dynamically calculated empty spread prices: {PRICE_1}, {PRICE_2}")
 print("\n--- TEST 1: CONSERVATION CHECK ---")
 print("Goal: Total BUY qty matched must equal total SELL qty consumed.")
 
-send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:1000:{PRICE_1}")
-send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:500:{PRICE_1}")
+send_cmd(sock, "REGISTER:main_tester")
+# Pre-purchase shares so main_tester can place LIMIT_SELLs
+send_cmd(sock, f"BUY:main_tester:{TEST_TICKER}:50")
+time.sleep(0.5)
+
+send_cmd(sock, f"LIMIT_BUY:main_tester:{TEST_TICKER}:20:{PRICE_1}")
+send_cmd(sock, f"LIMIT_SELL:main_tester:{TEST_TICKER}:10:{PRICE_1}")
 time.sleep(0.2)
 
 ob = send_cmd(sock, f"ORDERBOOK:{TEST_TICKER}")
 qty = get_resting_qty(ob, PRICE_1)
 
-if qty == 500:
-    print("✅ PASS: Exactly 500 shares remain in the book.")
+if qty == 10:
+    print("✅ PASS: Exactly 10 shares remain in the book.")
 else:
-    print(f"❌ FAIL: Expected 500 shares, but found {qty}.")
+    print(f"❌ FAIL: Expected 10 shares, but found {qty}.")
 
 
 print("\n--- TEST 2: TIME PRIORITY CHECK ---")
 print("Goal: Two identical LIMIT_BUYs. First one submitted must fill first.")
 
-r1 = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:100:{PRICE_2}")
-r2 = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:100:{PRICE_2}")
+r1 = send_cmd(sock, f"LIMIT_BUY:main_tester:{TEST_TICKER}:5:{PRICE_2}")
+r2 = send_cmd(sock, f"LIMIT_BUY:main_tester:{TEST_TICKER}:5:{PRICE_2}")
 id1 = extract_order_id(r1)
 id2 = extract_order_id(r2)
 
 if id1 == -1 or id2 == -1:
     print(f"❌ FAIL: Could not extract order IDs (r1={r1.strip()!r}, r2={r2.strip()!r})")
 else:
-    send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:100:{PRICE_2}")
+    send_cmd(sock, f"LIMIT_SELL:main_tester:{TEST_TICKER}:5:{PRICE_2}")
     time.sleep(0.2)
 
     c1 = send_cmd(sock, f"CANCEL_ORDER:{id1}")
@@ -119,6 +124,10 @@ lock = threading.Lock()
 def bot_worker(bot_id):
     global successful_trades, rejected_trades, latencies
     bsock = get_socket()
+    client_id = f"bot_{bot_id}"
+    send_cmd(bsock, f"REGISTER:{client_id}")
+    # Give bot 100 shares so it can sell
+    send_cmd(bsock, f"BUY:{client_id}:{TEST_TICKER}:100")
     local_success = 0
     local_rejects = 0
     local_lats = []
@@ -126,7 +135,7 @@ def bot_worker(bot_id):
     for _ in range(REQUESTS_PER_BOT):
         price = PRICE_1 + random.randint(-2, 2)
         action = "LIMIT_BUY" if random.random() > 0.5 else "LIMIT_SELL"
-        cmd = f"{action}:{TEST_TICKER}:10:{price:.2f}"
+        cmd = f"{action}:{client_id}:{TEST_TICKER}:1:{price:.2f}"
 
         t0 = time.perf_counter()
         reply = send_cmd(bsock, cmd)
