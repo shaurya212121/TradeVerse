@@ -1,7 +1,7 @@
 import zmq, time, re
 
 def get_socket():
-    sock = zmq.Context().socket(zmq.REQ)
+    sock = zmq.Context().socket(zmq.REQ)    
     sock.connect("tcp://127.0.0.1:5556")
     return sock
 
