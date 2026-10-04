@@ -6,54 +6,77 @@ import multiprocessing
 NUM_REQUESTS_PER_WORKER = 10000
 NUM_WORKERS = multiprocessing.cpu_count() or 4
 
+# All tickers loaded in the C++ engine — spread load to prove per-ticker sharding works
+TICKERS = ["AAPL", "TSLA", "GOOGL", "AMZN", "MSFT", "NVDA",
+           "TCS.NS", "RELIANCE.NS", "HDFCBANK.NS", "INFY.NS"]
+
 def worker(worker_id, num_requests):
     context = zmq.Context()
     socket = context.socket(zmq.REQ)
-    socket.setsockopt(zmq.RCVTIMEO, 2000) # 2s timeout
+    socket.setsockopt(zmq.RCVTIMEO, 5000) # 5 second timeout
     socket.connect("tcp://localhost:5556")
     
-    latencies = []
+    # 1. Register the benchmark worker so it has a valid account
+    client_id = f"bench_{worker_id}"
+    socket.send_string(f"REGISTER:{client_id}")
+    socket.recv_string()
     
-    # Warmup to establish connections and fill JIT caches
-    try:
-        for _ in range(100):
-            socket.send_string("FETCH:AAPL")
-            socket.recv_string()
-            
-        for _ in range(num_requests):
-            start = time.perf_counter()
-            socket.send_string("FETCH:AAPL")
-            socket.recv_string()
-            latencies.append((time.perf_counter() - start) * 1000)
-    except zmq.error.Again:
-        pass # Server crashed or timed out
-
+    # Warmup with real orders
+    for _ in range(100):
+        socket.send_string(f"BUY:{client_id}:AAPL:1")
+        socket.recv_string()
+    
+    latencies = []
+    failures = 0
+    
+    # 2. Fire real trades
+    for i in range(num_requests):
+        ticker = TICKERS[i % len(TICKERS)]  # Spread load across all tickers
+        side = "BUY" if i % 2 == 0 else "SELL"  # Alternate buy and sell
+        req_id = f"w{worker_id}_r{i}"
         
+        start = time.perf_counter()
+        try:
+            socket.send_string(f"{side}:{client_id}:{ticker}:1:{req_id}")
+            response = socket.recv_string()
+            latencies.append((time.perf_counter() - start) * 1000)
+            
+            # 4. Track if the engine rejected the trade (e.g. out of liquidity)
+            if "REJECTED" in response:
+                failures += 1
+        except zmq.error.Again:
+            failures += 1 # Timed out
+    
     socket.close()
-    return latencies
+    return latencies, failures
+
 
 def main():
     total_reqs = NUM_REQUESTS_PER_WORKER * NUM_WORKERS
-    print(f"Starting closed-loop benchmark with {NUM_WORKERS} workers...")
-    print(f"Targeting {total_reqs} total requests...")
+    print(f"Starting REAL TRADE benchmark with {NUM_WORKERS} workers...")
+    print(f"Targeting {total_reqs} total orders across {len(TICKERS)} tickers...")
     
     start_time = time.time()
     
     all_latencies = []
+    total_failures = 0
     
     # Using multiple processes to bypass the Python GIL and maximize ZMQ throughput
     with multiprocessing.Pool(NUM_WORKERS) as pool:
         results = pool.starmap(worker, [(i, NUM_REQUESTS_PER_WORKER) for i in range(NUM_WORKERS)])
         
-    for r in results:
-        all_latencies.extend(r)
+    for latencies, failures in results:
+        all_latencies.extend(latencies)
+        total_failures += failures
         
     total_time = time.time() - start_time
     
     print("\n--- Benchmark Results ---")
-    print(f"Total Requests: {len(all_latencies)}")
-    print(f"Total Time:     {total_time:.3f} seconds")
-    print(f"Throughput:     {len(all_latencies) / total_time:.0f} req/sec")
+    print(f"Total Requests:  {len(all_latencies)}")
+    print(f"Total Failures:  {total_failures}")
+    print(f"Success Rate:    {(1 - total_failures / max(len(all_latencies), 1)) * 100:.1f}%")
+    print(f"Total Time:      {total_time:.3f} seconds")
+    print(f"Throughput:      {len(all_latencies) / total_time:.0f} req/sec")
     
     if all_latencies:
         all_latencies.sort()
