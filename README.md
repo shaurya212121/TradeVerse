@@ -341,7 +341,6 @@ When deployed on an Ubuntu machine utilizing Python multiprocessing (200 bots, 5
 | **p95** | 2.58 ms |
 | **p99** | 3.12 ms |
 
-![Ubuntu Stress Test](assets/stress_test_ubuntu.png)
 
 ### Windows -- Local Environment
 
@@ -360,7 +359,6 @@ In a standard Windows environment (20 bots, 5000 trades each, 100,000 total requ
 | **p95** | 2.46 ms |
 | **p99** | 3.28 ms |
 
-![Windows Stress Test - 12K TPS](assets/stress_test_final.png)
 
 **Run 2 (15K TPS):**
 
@@ -375,7 +373,6 @@ In a standard Windows environment (20 bots, 5000 trades each, 100,000 total requ
 | **p95** | 2.00 ms |
 | **p99** | 2.84 ms |
 
-![Windows Stress Test - 15K TPS](assets/stress_test_15k.png)
 
 ### Correctness Validation
 
@@ -387,7 +384,6 @@ The matching engine passes strict verification tests under high concurrency:
 | **Time Priority** | Identical limit orders strictly follow FIFO execution fairness | Passed |
 | **Concentrated Load** | Single-ticker lock survives 20,000 simultaneous limit orders (14,985 orders/sec) without deadlocking | Passed |
 
-![Correctness Tests](assets/correctness_tests.png)
 
 ---
 
