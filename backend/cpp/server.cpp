@@ -91,49 +91,7 @@ std::string get_status_display() {
     oss << std::string(40, '=') << "\n  Server is HEALTHY";
     return oss.str();
 }
-// ============================================================================
-//  TRADE EXECUTION (MARKET ORDERS) — NOW WALKS THE BOOK
-//
-//  Market orders are routed through the per-ticker shard queue as IOC
-//  (Immediate-Or-Cancel) limit orders with aggressive prices:
-//    BUY  → LIMIT_BUY  at DBL_MAX  (will match any ask)
-//    SELL → LIMIT_SELL  at 0.01     (will match any bid)
-//
-//  The matching engine sweeps multiple price levels, calculating true VWAP.
-//  Unfilled remainder is discarded (IOC), not rested in the book.
-// ============================================================================
-std::string execute_trade(const std::string& action, const std::string& ticker, int qty) {
-    if (!shards.count(ticker) || !ticker_price_locks.count(ticker))
-        return "REJECTED | Asset '" + ticker + "' not found.";
 
-    // Route through the shard queue so matching is serialized per-ticker
-    std::string order_type;
-    double aggressive_price;
-    if (action == "BUY") {
-        order_type = "MARKET_BUY";
-        aggressive_price = 1e18;   // effectively infinite — matches any ask
-    } else if (action == "SELL") {
-        order_type = "MARKET_SELL";
-        aggressive_price = 0.01;   // effectively zero — matches any bid
-    } else {
-        return "REJECTED | Invalid action.";
-    }
-
-    // Build request and route through the shard processor
-    auto req = std::make_shared<OrderRequest>();
-    req->type = order_type;
-    req->ticker = ticker;
-    req->qty = qty;
-    req->price = aggressive_price;
-    req->order_id = 0;
-    std::future<std::string> fut = req->result_promise.get_future();
-    {
-        std::lock_guard<std::mutex> lg(shards[ticker].queue_lock);
-        shards[ticker].queue.push(req);
-    }
-    shards[ticker].cv.notify_one();
-    return fut.get();
-}
 
 // ============================================================================
 //  CANCEL MARKET ORDER (mark as cancelled in history)
@@ -198,7 +156,7 @@ void chatbox_worker_routine(zmq::context_t* context) {
                 double price = std::stod(trim(price_str));
                 std::string rejection = validate_buy(trim(client_id), trim(ticker), qty, price);
                 if (!rejection.empty()) reply_msg = rejection;
-                else reply_msg = submit_order_request("LIMIT_BUY", trim(ticker), qty, price, 0, trim(client_id));
+                else reply_msg = submit_order_request("LIMIT_BUY", trim(ticker), qty, price, 0, trim(client_id)).message;
             } catch (...) { reply_msg = "REJECTED | Invalid params. Format: LIMIT_BUY:CLIENT_ID:TICKER:QTY:PRICE"; }
         }
         else if (client_msg.rfind("LIMIT_SELL:", 0) == 0) {
@@ -211,7 +169,7 @@ void chatbox_worker_routine(zmq::context_t* context) {
                 double price = std::stod(trim(price_str));
                 std::string rejection = validate_sell(trim(client_id), trim(ticker), qty);
                 if (!rejection.empty()) reply_msg = rejection;
-                else reply_msg = submit_order_request("LIMIT_SELL", trim(ticker), qty, price, 0, trim(client_id));
+                else reply_msg = submit_order_request("LIMIT_SELL", trim(ticker), qty, price, 0, trim(client_id)).message;
             } catch (...) { reply_msg = "REJECTED | Invalid params. Format: LIMIT_SELL:CLIENT_ID:TICKER:QTY:PRICE"; }
         }
         // ---- ORDER BOOK VIEW ----
@@ -221,7 +179,7 @@ void chatbox_worker_routine(zmq::context_t* context) {
         // ---- CANCEL LIMIT ORDER ----
         else if (client_msg.rfind("CANCEL_ORDER:", 0) == 0) {
             try {
-                reply_msg = submit_order_request("CANCEL_ORDER", "", 0, 0, std::stoi(trim(client_msg.substr(13))));
+                reply_msg = submit_order_request("CANCEL_ORDER", "", 0, 0, std::stoi(trim(client_msg.substr(13)))).message;
             } catch (...) { reply_msg = "REJECTED | Invalid order ID."; }
         }
         // ---- CANCEL MARKET TRADE ----
@@ -282,46 +240,22 @@ void chatbox_worker_routine(zmq::context_t* context) {
                         if (!rejection.empty()) {
                             reply_msg = rejection;
                         } else {
-                            reply_msg = execute_trade(action, ticker, qty);
+                            double agg_price = (action == "BUY") ? 1e18 : 0.01;
+                            OrderResult res = submit_order_request("MARKET_" + action, ticker, qty, agg_price, 0, client_id);
 
-                            // Post-trade settlement: extract price from response
-                            if (reply_msg.find("SUCCESS") != std::string::npos ||
-                                reply_msg.find("PARTIAL") != std::string::npos) {
-                                // Parse VWAP from response: "... @ $123.45 ..."
-                                auto dollar_pos = reply_msg.find("$");
-                                if (dollar_pos != std::string::npos) {
-                                    double exec_price = 0;
-                                    try { exec_price = std::stod(reply_msg.substr(dollar_pos + 1)); } catch (...) {}
-                                    // Parse filled qty from response
-                                    int filled_qty = qty;  // default: assume full fill
-                                    auto bought_pos = reply_msg.find("Bought ");
-                                    auto sold_pos   = reply_msg.find("Sold ");
-                                    if (bought_pos != std::string::npos) {
-                                        try { filled_qty = std::stoi(reply_msg.substr(bought_pos + 7)); } catch (...) {}
-                                    } else if (sold_pos != std::string::npos) {
-                                        try { filled_qty = std::stoi(reply_msg.substr(sold_pos + 5)); } catch (...) {}
-                                    }
-                                    if (exec_price > 0 && filled_qty > 0) {
-                                        if (action == "BUY") {
-                                            settle_buy(client_id, ticker, filled_qty, exec_price, est_price);
-                                        } else {
-                                            settle_sell(client_id, ticker, filled_qty, exec_price, qty);
-                                        }
-                                    } else {
-                                        // Failed to parse VWAP, refund everything as a fallback
-                                        if (action == "BUY") refund_buy(client_id, qty, est_price);
-                                        else refund_sell(client_id, ticker, qty);
-                                    }
-                                } else {
-                                    // Failed to parse VWAP, refund everything as a fallback
-                                    if (action == "BUY") refund_buy(client_id, qty, est_price);
-                                    else refund_sell(client_id, ticker, qty);
-                                }
-                            } else {
-                                // trade REJECTED (e.g. no liquidity), refund
-                                if (action == "BUY") refund_buy(client_id, qty, est_price);
-                                else refund_sell(client_id, ticker, qty);
+                            if (res.success && res.filled > 0) {
+                                if (action == "BUY") settle_buy(client_id, ticker, res.filled, res.avg_price, est_price);
+                                else settle_sell(client_id, ticker, res.filled, res.avg_price, qty);
                             }
+                            
+                            // Refund any unfilled quantity (or full refund if completely rejected)
+                            if (res.filled < qty) {
+                                int unfilled = qty - res.filled;
+                                if (action == "BUY") refund_buy(client_id, unfilled, est_price);
+                                else refund_sell(client_id, ticker, unfilled);
+                            }
+                            
+                            reply_msg = res.message;
                         }
                     }
 
@@ -333,7 +267,8 @@ void chatbox_worker_routine(zmq::context_t* context) {
                     // Legacy format: BUY:TICKER:QTY (no account checks)
                     std::string ticker = fields[0];
                     int qty            = std::stoi(fields[1]);
-                    reply_msg = execute_trade(action, ticker, qty);
+                    double agg_price   = (action == "BUY") ? 1e18 : 0.01;
+                    reply_msg = submit_order_request("MARKET_" + action, ticker, qty, agg_price, 0, "").message;
                 } else {
                     reply_msg = "REJECTED | Invalid format. Use BUY:TICKER:QTY or BUY:CLIENT_ID:TICKER:QTY";
                 }
