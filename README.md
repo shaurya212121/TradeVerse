@@ -38,16 +38,6 @@ It implements per-ticker order books with price-time priority (FIFO), asynchrono
 
 > **Project Scope:** TradeVerse is a simulated matching core built to study distributed systems concepts (WAL durability, TOCTOU risk checks, idempotency, sharded order books). It is not a production-certified exchange engine.
 
-### Core Approaches
-
-| Challenge | TradeVerse's Approach |
-|---|---|
-| Concurrent Order Execution | Per-ticker sharded order books with mutex-protected FIFO queues |
-| Write Latency on Hot Path | Async WAL queue with dedicated background writer thread (disk I/O off hot path) |
-| Data Corruption Prevention | CRC32 checksum validation on WAL log records |
-| Race Conditions (TOCTOU) | Atomic balance checks and pre-trade cash/holdings reservations |
-| Client Communications | ZeroMQ ROUTER/DEALER for internal core messaging, WebSockets (FastAPI) for web UI |
-
 ---
 
 ## Quick Start
@@ -85,52 +75,37 @@ npm run dev
 
 ## Architecture
 
-```
-                          +-------------------------------------------------+
-                          |        React Frontend  (Browser UI)             |
-                          +-------------------------------------------------+
-                                                   |  WebSockets
-                                                   v
-                          +-------------------------------------------------+
-                          |   Python Gateway  (gateway_fastapi.py)          |
-                          +-------------------------------------------------+
-                                                   |  ZeroMQ (Port 5556 / 5555)
-                                                   v
-                          +-------------------------------------------------+
-                          |         C++ Server Engine (server.cpp)          |
-                          |                                                  |
-                          |  +----------+    +----------+                    |
-                          |  |  ROUTER  |----+  DEALER  |---> Worker         |
-                          |  |(frontend)|    |(backend) |     Threads        |
-                          |  +----------+    +----------+                    |
-                          |                                                  |
-                          |  +-------------------------------------------+  |
-                          |  |  Per-Ticker Order Shards                  |  |
-                          |  |  - Independent book_lock per ticker       |  |
-                          |  |  - std::mutex + condition_variable queue  |  |
-                          |  |  - Price-time priority matching           |  |
-                          |  |  - Result delivery via std::promise       |  |
-                          |  +-------------------------------------------+  |
-                          |                                                  |
-                          |  +-------------------------------------------+  |
-                          |  |  WAL Engine                                |  |
-                          |  |  - Append-only journal with CRC32          |  |
-                          |  |  - Async background writer thread          |  |
-                          |  +-------------------------------------------+  |
-                          +-------------------------------------------------+
+```mermaid
+flowchart TD
+    Client["🌐 React 19 Frontend<br/>(Obsidian Command Center)"]
+    Gateway["⚡ Python FastAPI Gateway<br/>(Session Binding & Validation)"]
+    ZMQ["🔀 ZeroMQ Sockets<br/>(tcp://localhost:5555)"]
+
+    subgraph Engine [" C++17 In-Memory Core Engine "]
+        Router["ROUTER / DEALER<br/>Worker Thread Pool"]
+        Shards["Per-Ticker Shards<br/>(AAPL, TSLA, NVDA, MSFT...)"]
+        Matcher["Price-Time Priority Matching<br/>(std::map Book Ladder)"]
+        Accounts["Account & Risk Balances<br/>(Thread-Safe Mutex)"]
+    end
+
+    WAL_Queue["📦 In-Memory WAL Buffer"]
+    DiskLog[("💾 Disk Journal (wal.log)<br/>CRC32 Checksummed")]
+
+    Client -->|WebSockets| Gateway
+    Gateway -->|ZeroMQ IPC| ZMQ
+    ZMQ --> Router
+    Router --> Shards
+    Shards --> Matcher
+    Matcher --> Accounts
+    Matcher -->|Async Push| WAL_Queue
+    WAL_Queue -->|10ms Flush Thread| DiskLog
 ```
 
-### Threading & Lock Structure
+The system is separated into three distinct layers:
+1. **Edge Client & Gateway:** A React browser client connects to a FastAPI gateway via WebSockets. The gateway validates session tokens and translates web actions into binary/IPC payloads.
+2. **Matching Core (C++17):** Orders are routed over ZeroMQ to independent, per-ticker orderbook shards. Because each ticker maintains its own mutex and price ladder, orders across different symbols process without lock contention.
+3. **Durability (Async WAL):** Executed trades are pushed into an in-memory queue and written to disk in 10ms batches by a dedicated background thread, keeping physical disk I/O completely off the hot matching path.
 
-The engine uses multiple concurrent threads and explicit mutexes to enforce thread-safety:
-
-| Subsystem | Locks Used | Purpose |
-|---|---|---|
-| **Order Book Shards** | `shards[ticker].book_lock` (`std::mutex`) | Isolates order book mutations per ticker symbol |
-| **Order Queues** | `shard.queue_lock` + `condition_variable` | Thread-safe producer-consumer queue for pending orders |
-| **Accounts** | `accounts_lock` (`std::mutex`) | Protects client cash balances and stock holdings |
-| **Deduplication** | `dedup_lock` (`std::mutex`) | Protects request idempotency cache |
-| **WAL Queue** | `wal_queue_lock` + `condition_variable` | Protects in-memory WAL write queue |
 
 ---
 
