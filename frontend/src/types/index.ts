@@ -50,3 +50,34 @@ export interface PortfolioPosition {
   qty: number;
   avgPrice: number;
 }
+
+export interface OpenOrder {
+  orderId: number;
+  ticker: Ticker;
+  side: "BUY" | "SELL";
+  price: number;
+  qty: number;
+  timestamp: number;
+}
+
+export interface WalLogEntry {
+  seq: number;
+  opcode: "ORDER_NEW" | "MATCH_EXEC" | "ORDER_CANCEL" | "CHECKPOINT";
+  ticker: string;
+  price: number;
+  qty: number;
+  len: number;
+  checksum: string;
+  status: "VALID" | "COMMITTED";
+  timestamp: number;
+}
+
+export interface EngineShardState {
+  ticker: Ticker;
+  coreId: number;
+  queueDepth: number;
+  lockContentionPct: number;
+  memoryKb: number;
+  status: "ACTIVE" | "IDLE";
+}
+

@@ -2,14 +2,12 @@ import pandas as pd
 import numpy as np
 import os
 
-# Configuration
 num_positions = 10000
 tickers = ["AAPL", "TSLA", "TCS", "RELIANCE", "HDFCBANK"]
 option_types = ["Call", "Put", "Stock"]
 
 print("🎲 Generating 10,000 randomized hedge fund positions...")
 
-# Generate randomized matrix data
 data = {
     "TICKER": np.random.choice(tickers, num_positions),
     "POSITION_SIZE": np.random.randint(100, 5000, num_positions) * np.random.choice([-1, 1], num_positions),
@@ -21,7 +19,6 @@ data = {
 portfolio_df = pd.DataFrame(data)
 portfolio_df.loc[portfolio_df["OPTION_TYPE"] == "Stock", ["STRIKE_PRICE", "EXPIRY_DAYS"]] = 0
 
-# Save to data/ directory
 output_path = os.path.join(os.path.dirname(__file__), "..", "data", "portfolio.csv")
 output_path = os.path.normpath(output_path)
 

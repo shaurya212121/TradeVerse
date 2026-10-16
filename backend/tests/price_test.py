@@ -33,7 +33,6 @@ r_better = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:100:{PRICE:.2f}")
 id_worse = int(re.search(r"\(order #(\d+)\)", r_worse).group(1))
 id_better = int(re.search(r"\(order #(\d+)\)", r_better).group(1))
 
-# Seller arrives at the worse price. Engine MUST choose Bot B (better deal).
 send_cmd(sock, f"LIMIT_SELL:{TEST_TICKER}:100:{PRICE - 0.10:.2f}")
 time.sleep(0.2)
 

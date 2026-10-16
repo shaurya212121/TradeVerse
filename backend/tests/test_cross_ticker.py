@@ -18,14 +18,12 @@ def get_resting_qty(ob_str, price):
 print("\n=== TEST: CROSS-TICKER ISOLATION (SHARDING) ===")
 sock = get_socket()
 
-# Use highly unique prices to guarantee zero overlap with dummy orders
 UNIQUE_AAPL = 9999.01
 UNIQUE_TSLA = 9999.02
 
 def dual_ticker_worker():
     lsock = get_socket()
     for _ in range(500):
-        # Heavy simultaneous traffic to both shards
         lsock.send_string(f"LIMIT_SELL:AAPL:10:{UNIQUE_AAPL:.2f}")
         lsock.recv_string()
         lsock.send_string(f"LIMIT_SELL:TSLA:10:{UNIQUE_TSLA:.2f}")

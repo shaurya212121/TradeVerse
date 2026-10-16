@@ -5,7 +5,6 @@
 #include <iomanip>
 #include <ctime>
 
-// Trim whitespace from string
 inline std::string trim(const std::string& str) {
     size_t first = str.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return "";
@@ -13,7 +12,6 @@ inline std::string trim(const std::string& str) {
     return str.substr(first, (last - first + 1));
 }
 
-// Generate current timestamp as string
 inline std::string get_timestamp() {
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);

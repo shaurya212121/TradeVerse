@@ -8,7 +8,6 @@ def worker(num_requests):
     sock.connect("tcp://127.0.0.1:5556")
     
     for _ in range(num_requests):
-        # Send pure market orders (BUY/SELL) instead of LIMIT orders
         sock.send_string("BUY:AAPL:10")
         sock.recv_string()
         sock.send_string("SELL:AAPL:10")

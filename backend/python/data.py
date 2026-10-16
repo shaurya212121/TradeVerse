@@ -2,7 +2,6 @@ import sys
 import os
 import warnings
 
-# Completely suppress stderr (where warnings are printed) to prevent yfinance from cluttering the console
 sys.stderr = open(os.devnull, 'w')
 warnings.filterwarnings("ignore")
 
@@ -10,7 +9,6 @@ import yfinance as yf
 import pandas as pd
 import time
 
-# Stocks to fetch
 stocks = [
     "AAPL", "TSLA", "TCS.NS", "RELIANCE.NS", "HDFCBANK.NS",
     "GOOGL", "AMZN", "MSFT", "NVDA", "INFY.NS"
@@ -35,9 +33,7 @@ for ticker in stocks:
                 clean_df["PRICE"] = df["Close"].values
                 clean_df["VOLUME"] = df["Volume"].values
 
-            # Drop rows where PRICE or VOLUME is NaN
             clean_df = clean_df.dropna(subset=["PRICE", "VOLUME"])
-            # Convert volume to integer
             clean_df["VOLUME"] = clean_df["VOLUME"].astype(int)
 
             all_data.append(clean_df)
@@ -49,20 +45,16 @@ for ticker in stocks:
 
     time.sleep(1)
 
-# Combine, Sort, and Save to data/ directory
 if all_data:
     print("\nMerging and structuring data for the C++ Exchange Server...")
     final_df = pd.concat(all_data, ignore_index=True)
     final_df = final_df.sort_values(by="TIMESTAMP")
 
-    # Build absolute path — avoids OSError 22 on Windows OneDrive paths with spaces
     script_dir = os.path.abspath(os.path.dirname(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, ".."))
     data_dir = os.path.join(project_root, "data")
     output_path = os.path.join(data_dir, "market_data1.csv")
     os.makedirs(data_dir, exist_ok=True)
-    # Write via open() with explicit encoding instead of passing the path string
-    # directly to pandas — this bypasses the Windows codec/path issue
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         final_df.to_csv(f, index=False)
 

@@ -1,56 +1,56 @@
 import { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { TopBar } from './components/TopBar';
-import { Watchlist } from './components/Watchlist';
-import { PriceChart } from './components/PriceChart';
-import { OrderBook } from './components/OrderBook';
-import { OrderEntryForm } from './components/OrderEntryForm';
-import { Portfolio } from './components/Portfolio';
-import { TradeHistory } from './components/TradeHistory';
+import { LandingPage } from './pages/LandingPage';
+import { MarketsPage } from './pages/MarketsPage';
+import { TradePage } from './pages/TradePage';
+import { TelemetryPage } from './pages/TelemetryPage';
+import { PortfolioPage } from './pages/PortfolioPage';
+import { SimulatorPage } from './pages/SimulatorPage';
 import { connectWebSocket, disconnectWebSocket } from './api/ws';
+import { startMockMarketSimulation, stopMockMarketSimulation } from './utils/mockMarketFeed';
+
+function AppContent() {
+  const location = useLocation();
+  const isLanding = location.pathname === '/';
+
+  return (
+    <div className="flex flex-col h-screen w-full bg-[#07080B] text-text-primary overflow-hidden select-none">
+      {/* TopBar shown on all dashboard pages */}
+      {!isLanding && <TopBar />}
+
+      {/* Main Multi-Page Routes */}
+      <main className="flex-1 flex overflow-hidden min-h-0 relative">
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/markets" element={<MarketsPage />} />
+          <Route path="/trade" element={<TradePage />} />
+          <Route path="/telemetry" element={<TelemetryPage />} />
+          <Route path="/portfolio" element={<PortfolioPage />} />
+          <Route path="/simulator" element={<SimulatorPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </main>
+    </div>
+  );
+}
 
 function App() {
   useEffect(() => {
+    // Connect to WebSocket and initialize resilient offline simulation
     connectWebSocket();
-    return () => disconnectWebSocket();
+    startMockMarketSimulation();
+
+    return () => {
+      disconnectWebSocket();
+      stopMockMarketSimulation();
+    };
   }, []);
 
   return (
-    <div className="flex flex-col h-screen w-full bg-background text-text-primary overflow-hidden">
-      <TopBar />
-      <div className="flex flex-1 overflow-hidden">
-        <div className="w-64 flex-shrink-0 flex flex-col h-full border-r border-border">
-          <div className="flex-1 overflow-hidden">
-            <Watchlist />
-          </div>
-          <div className="flex-[0.8] overflow-hidden">
-            <Portfolio />
-          </div>
-        </div>
-        
-        <div className="flex-1 flex flex-col p-2 gap-2">
-          <div className="flex-1 flex gap-2 min-h-0">
-            {/* Chart Panel */}
-            <div className="flex-1">
-              <PriceChart />
-            </div>
-            
-            {/* Order Book Panel */}
-            <div className="w-[300px] flex-shrink-0">
-              <OrderBook />
-            </div>
-          </div>
-          
-          <div className="h-[300px] flex gap-2 flex-shrink-0">
-            <div className="w-[340px] flex-shrink-0">
-              <OrderEntryForm />
-            </div>
-            <div className="flex-1">
-              <TradeHistory />
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <BrowserRouter>
+      <AppContent />
+    </BrowserRouter>
   );
 }
 

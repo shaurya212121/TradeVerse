@@ -7,12 +7,6 @@
 #include "orderbook.hpp"
 #include "account_manager.hpp"
 
-// ============================================================================
-//  IDEMPOTENCY — Request deduplication cache
-//  Maps request_id → cached_response.  If a client retries a request
-//  whose ID we've already processed, we return the cached reply.
-//  LRU eviction at 10,000 entries to bound memory.
-// ============================================================================
 inline std::unordered_map<std::string, std::string> dedup_cache;
 inline std::mutex dedup_lock;
 const size_t DEDUP_MAX_SIZE = 10000;
@@ -30,16 +24,12 @@ inline bool check_dedup(const std::string& req_id, std::string& cached_reply) {
 inline void store_dedup(const std::string& req_id, const std::string& reply) {
     std::lock_guard<std::mutex> lk(dedup_lock);
     if (dedup_cache.size() >= DEDUP_MAX_SIZE) {
-        // Simple eviction: clear half the cache (in production, use proper LRU)
         auto it = dedup_cache.begin();
         for (size_t i = 0; i < DEDUP_MAX_SIZE / 2 && it != dedup_cache.end(); ++i)
             it = dedup_cache.erase(it);
     }
     dedup_cache[req_id] = reply;
 }
-// ============================================================================
-//  PORTFOLIO / STATUS helpers (defined here — after both headers are included)
-// ============================================================================
 std::string get_portfolio_display() {
     if (live_market_prices.empty()) return "ERROR | No market data loaded.";
 
@@ -52,9 +42,6 @@ std::string get_portfolio_display() {
         << std::setw(14) << "BEST BID"
         << std::setw(14) << "BEST ASK"
         << "\n" << std::string(72, '-') << "\n";
-    // Lock each ticker individually — consistent with execute_trade's lock ordering.
-    // get_best_bid_ask() will then take book_lock internally (price-lock released first
-    // to avoid holding two locks simultaneously).
     for (const auto& [ticker, info_ignored] : live_market_prices) {
         StockInfo snap;
         {
@@ -93,16 +80,12 @@ std::string get_status_display() {
 }
 
 
-// ============================================================================
-//  CANCEL MARKET ORDER (mark as cancelled in history)
-// ============================================================================
 std::string cancel_trade(int trade_id) {
     std::lock_guard<std::mutex> lock(history_lock);
     for (auto& t : trade_history) {
         if (t.trade_id == trade_id) {
             if (t.cancelled) return "REJECTED | Trade #" + std::to_string(trade_id) + " already cancelled.";
             t.cancelled = true;
-            // Reverse the volume effect — use per-ticker lock, not global market_lock
             if (live_market_prices.count(t.ticker) && ticker_price_locks.count(t.ticker)) {
                 std::lock_guard<std::mutex> plock(ticker_price_locks.at(t.ticker));
                 if (t.action == "BUY")  live_market_prices.at(t.ticker).volume += t.qty;
@@ -114,9 +97,6 @@ std::string cancel_trade(int trade_id) {
     }
     return "REJECTED | Trade #" + std::to_string(trade_id) + " not found.";
 }
-// ============================================================================
-//  WORKER THREAD — HANDLES ALL CLIENT COMMANDS
-// ============================================================================
 void chatbox_worker_routine(zmq::context_t* context) {
     zmq::socket_t worker(*context, zmq::socket_type::rep);
     worker.connect("inproc://backend");
@@ -132,7 +112,6 @@ void chatbox_worker_routine(zmq::context_t* context) {
         std::string reply_msg;
 
         try {
-        // ---- REGISTER CLIENT ----
         if (client_msg.rfind("REGISTER:", 0) == 0) {
             std::string cid = trim(client_msg.substr(9));
             if (cid.empty()) { reply_msg = "REJECTED | Client ID cannot be empty."; }
@@ -141,11 +120,9 @@ void chatbox_worker_routine(zmq::context_t* context) {
                 reply_msg = "SUCCESS | Client '" + cid + "' registered with $100,000.00 cash.";
             }
         }
-        // ---- ACCOUNT VIEW ----
         else if (client_msg.rfind("ACCOUNT:", 0) == 0) {
             reply_msg = get_account_display(trim(client_msg.substr(8)));
         }
-        // ---- LIMIT ORDERS ----
         else if (client_msg.rfind("LIMIT_BUY:", 0) == 0) {
             std::stringstream ss(client_msg);
             std::string cmd, client_id, ticker, qty_str, price_str;
@@ -172,32 +149,25 @@ void chatbox_worker_routine(zmq::context_t* context) {
                 else reply_msg = submit_order_request("LIMIT_SELL", trim(ticker), qty, price, 0, trim(client_id)).message;
             } catch (...) { reply_msg = "REJECTED | Invalid params. Format: LIMIT_SELL:CLIENT_ID:TICKER:QTY:PRICE"; }
         }
-        // ---- ORDER BOOK VIEW ----
         else if (client_msg.rfind("ORDERBOOK:", 0) == 0) {
             reply_msg = get_orderbook_display(trim(client_msg.substr(10)));
         }
-        // ---- CANCEL LIMIT ORDER ----
         else if (client_msg.rfind("CANCEL_ORDER:", 0) == 0) {
             try {
                 reply_msg = submit_order_request("CANCEL_ORDER", "", 0, 0, std::stoi(trim(client_msg.substr(13)))).message;
             } catch (...) { reply_msg = "REJECTED | Invalid order ID."; }
         }
-        // ---- CANCEL MARKET TRADE ----
         else if (client_msg.rfind("CANCEL:", 0) == 0) {
             try {
                 reply_msg = cancel_trade(std::stoi(trim(client_msg.substr(7))));
             } catch (...) { reply_msg = "REJECTED | Invalid trade ID."; }
         }
-        // ---- MARKET ORDERS (with optional account checks) ----
-        // New format:  BUY:CLIENT_ID:TICKER:QTY[:REQUEST_ID]
-        // Legacy:      BUY:TICKER:QTY  (no account checks, backward compatible)
         else if (client_msg.rfind("BUY:", 0) == 0 || client_msg.rfind("SELL:", 0) == 0) {
             std::stringstream ss(client_msg);
             std::string action;
             std::getline(ss, action, ':');
             action = trim(action);
 
-            // Collect remaining fields
             std::vector<std::string> fields;
             std::string field;
             while (std::getline(ss, field, ':')) {
@@ -206,13 +176,11 @@ void chatbox_worker_routine(zmq::context_t* context) {
 
             try {
                 if (fields.size() >= 3) {
-                    // New format: BUY:CLIENT_ID:TICKER:QTY[:REQUEST_ID]
                     std::string client_id = fields[0];
                     std::string ticker    = fields[1];
                     int qty               = std::stoi(fields[2]);
                     std::string req_id    = (fields.size() >= 4) ? fields[3] : "";
 
-                    // Idempotency check
                     if (!req_id.empty()) {
                         std::string cached;
                         if (check_dedup(req_id, cached)) {
@@ -221,15 +189,12 @@ void chatbox_worker_routine(zmq::context_t* context) {
                         }
                     }
 
-                    // Account validation
                     if (!account_exists(client_id)) {
                         reply_msg = "REJECTED | Unknown client '" + client_id + "'. Send REGISTER:" + client_id + " first.";
                     } else {
-                        // Pre-trade risk check
                         std::string rejection;
                         double est_price = 0.0;
                         if (action == "BUY") {
-                            // Estimate price from best ask
                             auto [bid, ask] = get_best_bid_ask(ticker);
                             est_price = (ask > 0) ? ask : 999999.0;
                             rejection = validate_buy(client_id, ticker, qty, est_price);
@@ -248,7 +213,6 @@ void chatbox_worker_routine(zmq::context_t* context) {
                                 else settle_sell(client_id, ticker, res.filled, res.avg_price, qty);
                             }
                             
-                            // Refund any unfilled quantity (or full refund if completely rejected)
                             if (res.filled < qty) {
                                 int unfilled = qty - res.filled;
                                 if (action == "BUY") refund_buy(client_id, unfilled, est_price);
@@ -259,12 +223,10 @@ void chatbox_worker_routine(zmq::context_t* context) {
                         }
                     }
 
-                    // Store in dedup cache
                     if (!req_id.empty()) {
                         store_dedup(req_id, reply_msg);
                     }
                 } else if (fields.size() == 2) {
-                    // Legacy format: BUY:TICKER:QTY (no account checks)
                     std::string ticker = fields[0];
                     int qty            = std::stoi(fields[1]);
                     double agg_price   = (action == "BUY") ? 1e18 : 0.01;
@@ -274,7 +236,6 @@ void chatbox_worker_routine(zmq::context_t* context) {
                 }
             } catch (...) { reply_msg = "REJECTED | Invalid params."; }
         }
-        // ---- FETCH PRICE ----
         else if (client_msg.rfind("FETCH:", 0) == 0) {
             std::string target = trim(client_msg.substr(6));
             StockInfo info_copy;
@@ -300,19 +261,15 @@ void chatbox_worker_routine(zmq::context_t* context) {
                 reply_msg = "ERROR | Asset '" + target + "' not found.";
             }
         }
-        // ---- PORTFOLIO ----
         else if (client_msg == "PORTFOLIO") {
             reply_msg = get_portfolio_display();
         }
-        // ---- HISTORY ----
         else if (client_msg == "HISTORY") {
             reply_msg = get_history_display();
         }
-        // ---- STATUS CHECK ----
         else if (client_msg == "STATUS_CHECK") {
             reply_msg = get_status_display();
         }
-        // ---- UNKNOWN ----
         else {
             reply_msg = "ERROR | Unknown command. Valid commands:\n"
                         "  REGISTER:<CLIENT_ID>\n"
@@ -342,9 +299,6 @@ void chatbox_worker_routine(zmq::context_t* context) {
     }
 }
 
-// ============================================================================
-//  ROUTER-DEALER PROXY
-// ============================================================================
 
 void run_chatbox_proxy_server() {
     zmq::context_t context(1);
@@ -361,9 +315,6 @@ void run_chatbox_proxy_server() {
     for (auto& t : workers) if (t.joinable()) t.join();
 }
 
-// ============================================================================
-//  MAIN STARTUP SEQUENCE
-// ============================================================================
 
 int main() {
     std::cout << "\nStarting TradeVerse Server...\n";
@@ -380,7 +331,6 @@ int main() {
     std::getline(file, line); // Skip header — read column names to know format
     std::cout << "[INIT] CSV header: " << line << "\n";
 
-    // Determine if volume column exists
     bool has_volume = (line.find("VOLUME") != std::string::npos ||
                        line.find("Volume") != std::string::npos);
 
@@ -399,17 +349,13 @@ int main() {
             if (has_volume && !trim(vol).empty()) {
                 volume = std::stoi(trim(vol));
             } else {
-                // Default volume if column missing or empty
                 volume = 1000000;
             }
-            // Keep only the latest price per ticker (CSV is sorted by time)
             std::string clean_tkr = trim(tkr);
             live_market_prices[clean_tkr] = {trim(ts), std::stod(trim(prc)), volume};
-            // Populate ticker_price_locks now (single-threaded) — no concurrent-insertion risk
             ticker_price_locks[clean_tkr];
             loaded++;
         } catch (...) {
-            // Skip malformed rows silently
         }
     }
     file.close();
@@ -421,7 +367,6 @@ int main() {
 
     std::cout << "[INIT] Loaded " << live_market_prices.size() << " tickers from " << loaded << " CSV rows.\n";
 
-    // Seed order books for every loaded ticker
     for (const auto& [ticker, info] : live_market_prices) {
         base_prices[ticker] = info.price;
         seed_orderbook(ticker, info.price);
@@ -431,7 +376,6 @@ int main() {
 
     replay_wal();
 
-    // Launch one dedicated processor thread per ticker (per-ticker parallelism)
     for (const auto& [ticker, info] : live_market_prices) {
         std::thread(ticker_processor_thread, ticker).detach();
     }
@@ -447,9 +391,6 @@ int main() {
     std::cout << "[INIT] Server fully started. Ready to accept trades.\n\n";
 
     while (true) {
-        // Fix 4 (broadcaster): snapshot each ticker's price under its own lock,
-        // then send outside the lock.  No single lock is held across the whole sweep,
-        // so execute_trade on any ticker is never blocked by this loop.
         std::vector<std::pair<std::string, std::string>> snapshots;
         snapshots.reserve(live_market_prices.size());
         for (const auto& [ticker, info_ignored] : live_market_prices) {

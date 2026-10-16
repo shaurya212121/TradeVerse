@@ -14,9 +14,6 @@
 #include "utils.hpp"
 #include "crc32.hpp"
 
-// ============================================================================
-//  DATA STRUCTURES
-// ============================================================================
 
 struct StockInfo {
     std::string timestamp;
@@ -34,16 +31,10 @@ struct TradeRecord {
     bool cancelled;
 };
 
-// ============================================================================
-//  GLOBAL STATE
-// ============================================================================
 
 inline std::unordered_map<std::string, StockInfo> live_market_prices;
 inline std::mutex market_lock;  // kept for structural reads (size, existence checks)
 
-// Fix 4 (complete): one dedicated price lock per ticker, populated at startup.
-// execute_trade / price_simulator / sync_to_csv all use these instead of market_lock
-// for per-StockInfo reads and writes, so unrelated tickers don't contend at all.
 inline std::unordered_map<std::string, std::mutex> ticker_price_locks;
 
 inline std::deque<TradeRecord> trade_history;
@@ -51,7 +42,6 @@ inline std::mutex history_lock;
 inline std::atomic<int> next_trade_id{1};
 inline std::atomic<bool> dirty_flag{false};
 
-// Base prices loaded at startup — used for mean reversion
 inline std::unordered_map<std::string, double> base_prices;
 
 const std::string CSV_FILE       = "data/market_data1.csv";
@@ -62,9 +52,6 @@ const int FLUSH_INTERVAL_SEC = 5;
 const size_t MAX_HISTORY_SIZE = 500;
 const int PRICE_TICK_MS = 500;
 
-// Volatility reduced 10x — bot order-book matching now drives price discovery.
-// The simulator only adds tiny microstructure noise to keep the chart alive
-// when no bots are active; actual trades dominate price movement.
 const std::unordered_map<std::string, double> TICKER_VOLATILITY = {
     {"AAPL",        0.00012},
     {"TSLA",        0.00030},
@@ -78,9 +65,6 @@ const std::unordered_map<std::string, double> TICKER_VOLATILITY = {
     {"INFY.NS",     0.00009},
 };
 
-// ============================================================================
-//  ASYNC WAL QUEUE — disk writes happen off the hot path
-// ============================================================================
 
 struct WalEntry {
     std::string action;
@@ -96,7 +80,6 @@ inline std::queue<WalEntry>  wal_queue;
 inline std::mutex            wal_queue_lock;
 inline std::condition_variable wal_queue_cv;
 
-// ---------- non-blocking push (called from trade threads) ----------
 inline void wal_log(const std::string& action, const std::string& ticker, int qty, double price) {
     WalEntry entry;
     entry.action   = action;
@@ -112,7 +95,6 @@ inline void wal_log(const std::string& action, const std::string& ticker, int qt
     wal_queue_cv.notify_one();
 }
 
-// Overload: push WAL + trade-history entry in one shot
 inline void wal_log_with_history(const std::string& action, const std::string& ticker,
                                  int qty, double price, const TradeRecord& rec) {
     WalEntry entry;
@@ -130,7 +112,6 @@ inline void wal_log_with_history(const std::string& action, const std::string& t
     wal_queue_cv.notify_one();
 }
 
-// ---------- background writer thread ----------
 inline void async_wal_writer_thread() {
     std::cout << "[INIT] Async WAL writer thread started." << std::endl;
     static std::ofstream wal(WAL_FILE, std::ios::app);
@@ -145,7 +126,6 @@ inline void async_wal_writer_thread() {
             wal_queue.pop();
         }
 
-        // --- WAL write with CRC32 checksum ---
         if (!entry.action.empty()) {
             if (wal.is_open()) {
                 std::ostringstream payload_ss;
@@ -159,7 +139,6 @@ inline void async_wal_writer_thread() {
             }
         }
 
-        // --- Trade history write (if attached) ---
         if (entry.has_trade_record) {
             const auto& t = entry.trade_record;
             if (hist.is_open()) {
@@ -176,9 +155,7 @@ inline void async_wal_writer_thread() {
 
 
 
-// ---------- legacy sync helper (still used by cancel path) ----------
 inline void log_trade_history(const TradeRecord& trade) {
-    // Push to async queue so it gets written in the background
     WalEntry entry;
     entry.action = trade.action;
     entry.ticker = trade.ticker;
@@ -200,8 +177,6 @@ inline void sync_to_csv() {
     if (!file.is_open()) return;
 
     file << "Date,Ticker,Price,Volume\n";
-    // Lock each ticker individually — keeps CSV consistent per-row without
-    // blocking execute_trade on other tickers while we write.
     for (const auto& [ticker, info_ignored] : live_market_prices) {
         StockInfo snap;
         {
@@ -225,9 +200,6 @@ inline void async_flush_thread() {
     }
 }
 
-// ============================================================================
-//  QUERY HELPERS — HISTORY
-// ============================================================================
 
 inline std::string get_history_display(int limit = 20) {
     std::lock_guard<std::mutex> lock(history_lock);
@@ -261,9 +233,6 @@ inline std::string get_history_display(int limit = 20) {
     return oss.str();
 }
 
-// ============================================================================
-//  PRICE SIMULATOR
-// ============================================================================
 
 inline void price_simulator_thread() {
     std::mt19937 rng(std::random_device{}());
@@ -274,9 +243,6 @@ inline void price_simulator_thread() {
         std::this_thread::sleep_for(std::chrono::milliseconds(PRICE_TICK_MS));
         std::string ts = get_timestamp();
 
-        // Fix 4: lock each ticker individually — a market order on TSLA can now
-        // proceed while we're updating AAPL's price.  The global market_lock is
-        // NOT held here, so the broadcaster and execute_trade don't block us.
         for (auto& [ticker, info] : live_market_prices) {
             std::lock_guard<std::mutex> plock(ticker_price_locks.at(ticker));
 

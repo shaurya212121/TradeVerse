@@ -31,11 +31,6 @@ def get_spread_prices(ob_str):
     bids = []
     mode = "ASKS"
     for line in ob_str.split("\n"):
-        # FIX: switch mode on the SPREAD line, which sits between the
-        # asks and bids sections in the real output. The old code waited
-        # for the "BIDS" label, which only appears AFTER the bid price
-        # lines (it's a footer, not a header) — so every bid price was
-        # being misclassified as an ask.
         if "SPREAD" in line:
             mode = "BIDS"
             continue
@@ -51,8 +46,6 @@ def get_spread_prices(ob_str):
     lowest_ask = min(asks) if asks else 100.0
     highest_bid = max(bids) if bids else 0.0
 
-    # Safety check: if the book is inverted/empty and there's no real gap,
-    # fall back to a sane default instead of producing a nonsensical price.
     if lowest_ask <= highest_bid:
         return round(highest_bid + 1.0, 2), round(highest_bid + 2.0, 2)
 
@@ -95,9 +88,6 @@ r2 = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:100:{PRICE_2}")
 id1 = extract_order_id(r1)
 id2 = extract_order_id(r2)
 
-# Defensive check: if either order didn't rest cleanly (e.g. partially
-# matched instead), extract_order_id returns -1 and the test below would
-# be meaningless. Fail loudly instead of silently passing/failing wrong.
 if id1 == -1 or id2 == -1:
     print(f"❌ FAIL: Could not extract order IDs (r1={r1.strip()!r}, r2={r2.strip()!r})")
 else:

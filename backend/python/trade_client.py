@@ -13,7 +13,6 @@ def main():
     if not client_id:
         client_id = "default"
     
-    # ── ZeroMQ connection ────────────────────────────────────────────────────
     context = zmq.Context()
 
     print("Connecting to TradeVerse Engine on port 5556...")
@@ -21,7 +20,6 @@ def main():
     socket.setsockopt(zmq.RCVTIMEO, 8000)          # 8 s timeout — never hang
     socket.connect("tcp://localhost:5556")
     
-    # ── Register Account ─────────────────────────────────────────────────────
     socket.send_string(f"REGISTER:{client_id}")
     try:
         resp = socket.recv_string()
@@ -67,15 +65,12 @@ def main():
                 print("Exiting trading terminal...")
                 break
 
-            # Process command
             command = raw_command
             parts = command.split(":")
             
-            # Map MY_ACCOUNT to ACCOUNT:client_id
             if command.upper() == "MY_ACCOUNT":
                 command = f"ACCOUNT:{client_id}"
             
-            # Inject Client ID and Request ID into MARKET orders for idempotency
             elif len(parts) >= 3 and parts[0].upper() in ("BUY", "SELL"):
                 action = parts[0].upper()
                 ticker = parts[1].upper()
@@ -83,7 +78,6 @@ def main():
                 req_id = str(uuid.uuid4())
                 command = f"{action}:{client_id}:{ticker}:{qty}:{req_id}"
 
-            # Inject Client ID into LIMIT orders
             elif len(parts) >= 4 and parts[0].upper() in ("LIMIT_BUY", "LIMIT_SELL"):
                 action = parts[0].upper()
                 ticker = parts[1].upper()
@@ -91,7 +85,6 @@ def main():
                 price = parts[3]
                 command = f"{action}:{client_id}:{ticker}:{qty}:{price}"
 
-            # ── Send command to C++ backend via ZeroMQ ────────────────────────
             start_time = time.perf_counter()
             socket.send_string(command)
 
@@ -104,7 +97,6 @@ def main():
             except zmq.Again:
                 print("\n[TIMEOUT] Server did not respond in 8 seconds.")
                 print("Check that start.bat is running in another terminal.\n")
-                # Reconnect socket so next command works cleanly
                 socket.close()
                 socket = context.socket(zmq.REQ)
                 socket.setsockopt(zmq.RCVTIMEO, 8000)

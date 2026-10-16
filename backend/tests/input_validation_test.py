@@ -15,23 +15,18 @@ TEST_TICKER = "AAPL"
 
 print("\n=== TEST: INPUT VALIDATION & EDGE CASES ===")
 
-# 1. Zero Quantity
 r_zero = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:0:150.00")
 print(f"1. Zero Qty Check        -> {r_zero.strip()}")
 
-# 2. Negative Quantity
 r_neg = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:-10:150.00")
 print(f"2. Negative Qty Check    -> {r_neg.strip()}")
 
-# 3. Invalid Ticker
 r_fake = send_cmd(sock, "LIMIT_BUY:FAKESTOCK:10:150.00")
 print(f"3. Fake Ticker Check     -> {r_fake.strip()}")
 
-# 4. Cancel Non-existent Order
 r_fake_cancel = send_cmd(sock, "CANCEL_ORDER:99999999")
 print(f"4. Fake Cancel Check     -> {r_fake_cancel.strip()}")
 
-# 5. Double Cancel Test
 r_real = send_cmd(sock, f"LIMIT_BUY:{TEST_TICKER}:10:1.00")
 match = re.search(r"\(order #(\d+)\)", r_real)
 if match:

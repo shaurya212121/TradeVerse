@@ -23,7 +23,6 @@ app.add_middleware(
 
 context = zmq.asyncio.Context()
 
-# Global state for connected clients
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
@@ -49,7 +48,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ZMQ REQ Socket (with a lock so concurrent WS requests don't break the REQ-REP pattern)
 req_socket = context.socket(zmq.REQ)
 req_socket.connect("tcp://localhost:5556")
 req_socket.setsockopt(zmq.RCVTIMEO, 2000) # 2 second timeout
@@ -64,11 +62,9 @@ async def send_zmq_request(command: str) -> str:
             return response
         except zmq.error.Again:
             logger.error("ZMQ REQ timed out. C++ server might be down.")
-            # Disconnect all clients to show offline in UI
             for conn in list(manager.active_connections):
                 await conn.close()
             
-            # Recreate socket to clear the state
             req_socket.close()
             req_socket = context.socket(zmq.REQ)
             req_socket.connect("tcp://localhost:5556")
@@ -96,7 +92,6 @@ def parse_orderbook_text(text: str, ticker: str) -> dict:
         if "BIDS (Buyers)" in line:
             continue
         
-        # Parse price and qty: "$    150.50     x    100"
         match = re.search(r'\$\s*([0-9.]+)\s*x\s*([0-9]+)', line)
         if match:
             price = float(match.group(1))
@@ -106,7 +101,6 @@ def parse_orderbook_text(text: str, ticker: str) -> dict:
             elif current_section == "bids":
                 bids.append({"price": price, "qty": qty})
                 
-    # Sort just in case (asks ascending, bids descending)
     asks.sort(key=lambda x: x["price"])
     bids.sort(key=lambda x: x["price"], reverse=True)
     
@@ -126,7 +120,6 @@ async def zmq_sub_worker():
     while True:
         try:
             msg = await sub_socket.recv_string()
-            # Format is usually TICKER,PRICE
             parts = msg.split(",")
             if len(parts) == 2:
                 ticker = parts[0]
@@ -166,19 +159,30 @@ async def account_poller():
             try:
                 response = await send_zmq_request("ACCOUNT:web_gateway")
                 if "ERROR" not in response:
-                    # ACCOUNT: web_gateway | Cash: $100000.00 | Holdings: AAPL: 10, TSLA: 5
-                    cash_match = re.search(r"Cash:\s*\$([0-9.]+)", response)
+                    cash_match = re.search(r"Cash Balance:\s*\$([0-9.]+)", response)
                     cash = float(cash_match.group(1)) if cash_match else 0.0
                     
                     holdings = []
-                    if "Holdings: " in response and "None" not in response.split("Holdings: ")[1]:
-                        holdings_str = response.split("Holdings: ")[1].strip()
-                        pairs = holdings_str.split(",")
-                        for pair in pairs:
-                            if ":" in pair:
-                                tkr, qty = pair.split(":")
-                                holdings.append({"ticker": tkr.strip(), "qty": int(qty.strip()), "avgPrice": 0})
-                                
+                    if "No holdings" not in response:
+                        lines = response.split('\n')
+                        parsing_holdings = False
+                        for line in lines:
+                            if "TICKER" in line and "SHARES" in line:
+                                parsing_holdings = True
+                                continue
+                            if parsing_holdings and "---" in line:
+                                continue
+                            if parsing_holdings and "===" in line:
+                                break
+                            if parsing_holdings and line.strip():
+                                parts = line.strip().split()
+                                if len(parts) >= 2:
+                                    holdings.append({
+                                        "ticker": parts[0],
+                                        "qty": int(parts[1]),
+                                        "avgPrice": 0
+                                    })
+                                    
                     await manager.broadcast({
                         "type": "PORTFOLIO",
                         "cash": cash,
@@ -192,7 +196,6 @@ async def account_poller():
 
 @app.on_event("startup")
 async def startup_event():
-    # Register the gateway's account with the C++ engine
     try:
         res = await send_zmq_request("REGISTER:web_gateway")
         logger.info(f"Registered gateway account: {res}")
@@ -203,32 +206,57 @@ async def startup_event():
     asyncio.create_task(orderbook_poller())
     asyncio.create_task(account_poller())
 
+@app.post("/api/auth/token")
+async def generate_auth_token(username: str = "web_gateway"):
+    """
+    Generates an authentication token for the given client username.
+    Also ensures the user account is registered on the C++ matching engine.
+    """
+    clean_id = re.sub(r'[^a-zA-Z0-9_]', '', username) or "web_gateway"
+    try:
+        await send_zmq_request(f"REGISTER:{clean_id}")
+    except Exception as e:
+        logger.error(f"Error registering user {clean_id}: {e}")
+    token = f"token_{clean_id}_{uuid.uuid4().hex[:8]}"
+    return {"token": token, "client_id": clean_id}
+
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: str = None):
+    # Parse client_id from token or query params (defaults to web_gateway)
+    client_id = "web_gateway"
+    if token and token.startswith("token_"):
+        parts = token.split("_")
+        if len(parts) >= 2:
+            client_id = parts[1]
+            
     await manager.connect(websocket)
     try:
         while True:
             data = await websocket.receive_text()
             payload = json.loads(data)
             
-            # Action: change active ticker
             if payload.get("action") == "SET_ACTIVE_TICKER":
                 manager.active_ticker = payload.get("ticker", "AAPL")
                 
-            # Action: place order
             elif payload.get("action") == "SUBMIT_ORDER":
                 cmd = payload.get("command") # e.g., "BUY:AAPL:10"
                 if cmd:
-                    # Inject client_id and idempotency UUID for MARKET orders
                     parts = cmd.strip().split(":")
                     if len(parts) >= 3 and parts[0].upper() in ("BUY", "SELL"):
                         action = parts[0].upper()
                         ticker = parts[1].upper()
                         qty = parts[2]
                         req_id = str(uuid.uuid4())
-                        cmd = f"{action}:web_gateway:{ticker}:{qty}:{req_id}"
+                        cmd = f"{action}:{client_id}:{ticker}:{qty}:{req_id}"
+                        
+                    elif len(parts) >= 4 and parts[0].upper() in ("LIMIT_BUY", "LIMIT_SELL"):
+                        action = parts[0].upper()
+                        ticker = parts[1].upper()
+                        qty = parts[2]
+                        price = parts[3]
+                        cmd = f"{action}:{client_id}:{ticker}:{qty}:{price}"
 
-                    logger.info(f"Submitting order: {cmd}")
+                    logger.info(f"Submitting authenticated order for [{client_id}]: {cmd}")
                     res = await send_zmq_request(cmd)
                     await websocket.send_json({
                         "type": "ORDER_RESPONSE",

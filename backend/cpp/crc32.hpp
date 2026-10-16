@@ -4,10 +4,6 @@
 #include <sstream>
 #include <iomanip>
 
-// ============================================================================
-//  CRC32 — header-only implementation for WAL integrity checking.
-//  Uses the standard CRC-32 polynomial (0xEDB88320, reflected).
-// ============================================================================
 
 inline uint32_t crc32(const std::string& data) {
     uint32_t crc = 0xFFFFFFFF;

@@ -3,7 +3,6 @@ import time
 import multiprocessing
 import random
 
-# List of tickers supported by the server
 TICKERS = ["AAPL", "TSLA", "TCS.NS", "RELIANCE.NS", "HDFCBANK.NS", "GOOGL", "AMZN", "MSFT", "NVDA", "INFY.NS"]
 
 def bot_worker(bot_id, num_requests, target_ip):
@@ -30,7 +29,6 @@ def bot_worker(bot_id, num_requests, target_ip):
         
         try:
             socket.send_string(command)
-            # ACTUALLY CHECK THE REPLY HERE TO SEE IF IT WORKED
             reply = socket.recv_string() 
             end_time = time.perf_counter()
             
@@ -53,11 +51,9 @@ def calculate_percentile(data, percentile):
     return data[index]
 
 if __name__ == "__main__":
-    # --- CONFIGURE YOUR TEST HERE ---
     NUM_BOTS = 10            # Number of simultaneous traders
-    REQUESTS_PER_BOT = 2000  # How many trades each bot makes
+    REQUESTS_PER_BOT = 10000 # Increased to 10,000 per bot = 100,000 total (1 Lakh)
     TARGET_IP = "localhost" # Change this to your friend's Tailscale IP when testing over the internet!
-    # --------------------------------
 
     total_expected = NUM_BOTS * REQUESTS_PER_BOT
     print(f"🔥 Starting Stress Test: {NUM_BOTS} bots firing {REQUESTS_PER_BOT} trades each.")
@@ -66,14 +62,12 @@ if __name__ == "__main__":
     
     start_total = time.time()
     
-    # Use multiprocessing to bypass Python's GIL and use all CPU cores
     with multiprocessing.Pool(NUM_BOTS) as pool:
         args = [(i, REQUESTS_PER_BOT, TARGET_IP) for i in range(NUM_BOTS)]
         results = pool.starmap(bot_worker, args)
         
     end_total = time.time()
     
-    # Flatten the results from all bots into one giant list
     all_latencies = []
     total_successes = 0
     total_rejections = 0
