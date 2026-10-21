@@ -300,9 +300,59 @@ void chatbox_worker_routine(zmq::context_t* context) {
 }
 
 
+const char* SERVER_CURVE_SEC = "IK#}02)!Tdu1BujbvD>=y8.I&?jcAKi[-E^>ag1E";
+const char* ALLOWED_GATEWAY_PUB = "fLG9t-+%NRkyH4Y+)<gjn}-$F{?PjPT3hLmp/bEy";
+
+void zap_auth_thread(zmq::context_t* ctx) {
+    zmq::socket_t zap(*ctx, zmq::socket_type::rep);
+    zap.bind("inproc://zeromq.zap.01");
+
+    while (true) {
+        std::vector<zmq::message_t> req;
+        while (true) {
+            zmq::message_t msg;
+            auto res = zap.recv(msg, zmq::recv_flags::none);
+            if (!res) break;
+            req.push_back(std::move(msg));
+            if (!zap.get(zmq::sockopt::rcvmore)) break;
+        }
+
+        if (req.size() < 7) continue;
+
+        std::string version(static_cast<char*>(req[0].data()), req[0].size());
+        std::string sequence(static_cast<char*>(req[1].data()), req[1].size());
+        std::string mechanism(static_cast<char*>(req[5].data()), req[5].size());
+
+        bool allowed = false;
+        if (mechanism == "CURVE" && req[6].size() == 32) {
+            char client_z85[41];
+            zmq_z85_encode(client_z85, static_cast<uint8_t*>(req[6].data()), 32);
+            if (std::string(client_z85) == ALLOWED_GATEWAY_PUB) {
+                allowed = true;
+            }
+        }
+
+        std::string status = allowed ? "200" : "400";
+        std::string status_text = allowed ? "OK" : "DENIED";
+        std::string user_id = allowed ? "fastapi_gateway" : "";
+
+        zap.send(zmq::message_t(version.data(), version.size()), zmq::send_flags::sndmore);
+        zap.send(zmq::message_t(sequence.data(), sequence.size()), zmq::send_flags::sndmore);
+        zap.send(zmq::message_t(status.data(), status.size()), zmq::send_flags::sndmore);
+        zap.send(zmq::message_t(status_text.data(), status_text.size()), zmq::send_flags::sndmore);
+        zap.send(zmq::message_t(user_id.data(), user_id.size()), zmq::send_flags::sndmore);
+        zap.send(zmq::message_t("", 0), zmq::send_flags::none);
+    }
+}
+
 void run_chatbox_proxy_server() {
     zmq::context_t context(1);
+    std::thread auth(zap_auth_thread, &context);
+    auth.detach();
+
     zmq::socket_t frontend(context, zmq::socket_type::router);
+    frontend.set(zmq::sockopt::curve_server, 1);
+    frontend.set(zmq::sockopt::curve_secretkey, SERVER_CURVE_SEC);
     frontend.bind("tcp://*:5556");
     zmq::socket_t backend(context, zmq::socket_type::dealer);
     backend.bind("inproc://backend");
@@ -310,7 +360,7 @@ void run_chatbox_proxy_server() {
     std::vector<std::thread> workers;
     for (int i = 0; i < 10; ++i) workers.push_back(std::thread(chatbox_worker_routine, &context));
 
-    std::cout << "[INIT] Multithreaded Control Plane active on port 5556." << std::endl;
+    std::cout << "[INIT] Multithreaded Control Plane active on port 5556 with CurveZMQ & ZAP Authentication." << std::endl;
     zmq::proxy(frontend, backend);
     for (auto& t : workers) if (t.joinable()) t.join();
 }

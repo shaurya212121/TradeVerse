@@ -48,9 +48,20 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-req_socket = context.socket(zmq.REQ)
-req_socket.connect("tcp://localhost:5556")
-req_socket.setsockopt(zmq.RCVTIMEO, 2000) # 2 second timeout
+CURVE_SERVER_PUB = b".OVlZOQ!o(TwV&50-2g#W:Rg/z5p9n!GxY{9LisH"
+CURVE_CLIENT_PUB = b"fLG9t-+%NRkyH4Y+)<gjn}-$F{?PjPT3hLmp/bEy"
+CURVE_CLIENT_SEC = b"!eProFs0h9rqmdglyb@YpY^?M[Gah2Ws4.X(FZ+?"
+
+def create_req_socket():
+    sock = context.socket(zmq.REQ)
+    sock.curve_serverkey = CURVE_SERVER_PUB
+    sock.curve_publickey = CURVE_CLIENT_PUB
+    sock.curve_secretkey = CURVE_CLIENT_SEC
+    sock.setsockopt(zmq.RCVTIMEO, 2000)
+    sock.connect("tcp://localhost:5556")
+    return sock
+
+req_socket = create_req_socket()
 req_lock = asyncio.Lock()
 
 async def send_zmq_request(command: str) -> str:
@@ -66,9 +77,7 @@ async def send_zmq_request(command: str) -> str:
                 await conn.close()
             
             req_socket.close()
-            req_socket = context.socket(zmq.REQ)
-            req_socket.connect("tcp://localhost:5556")
-            req_socket.setsockopt(zmq.RCVTIMEO, 2000)
+            req_socket = create_req_socket()
             raise Exception("Server offline")
 
 def parse_orderbook_text(text: str, ticker: str) -> dict:

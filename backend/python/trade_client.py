@@ -15,9 +15,11 @@ def main():
     
     context = zmq.Context()
 
-    print("Connecting to TradeVerse Engine on port 5556...")
+    print("Connecting to TradeVerse Engine on port 5556 with CurveZMQ...")
     socket = context.socket(zmq.REQ)
     socket.setsockopt(zmq.RCVTIMEO, 8000)          # 8 s timeout — never hang
+    from curve_auth import setup_curve_client
+    setup_curve_client(socket)
     socket.connect("tcp://localhost:5556")
     
     socket.send_string(f"REGISTER:{client_id}")

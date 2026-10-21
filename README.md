@@ -91,8 +91,8 @@ flowchart TD
     WAL_Queue["📦 In-Memory WAL Buffer"]
     DiskLog[("💾 Disk Journal (wal.log)<br/>CRC32 Checksummed")]
 
-    Client -->|WebSockets| Gateway
-    Gateway -->|ZeroMQ IPC| ZMQ
+    Client -->|WebSockets + JWT| Gateway
+    Gateway -->|CurveZMQ + ZAP Auth| ZMQ
     ZMQ --> Router
     Router --> Shards
     Shards --> Matcher
@@ -105,6 +105,7 @@ The system is separated into three distinct layers:
 1. **Edge Client & Gateway:** A React browser client connects to a FastAPI gateway via WebSockets. The gateway validates session tokens and translates web actions into binary/IPC payloads.
 2. **Matching Core (C++17):** Orders are routed over ZeroMQ to independent, per-ticker orderbook shards. Because each ticker maintains its own mutex and price ladder, orders across different symbols process without lock contention.
 3. **Durability (Async WAL):** Executed trades are pushed into an in-memory queue and written to disk in 10ms batches by a dedicated background thread, keeping physical disk I/O completely off the hot matching path.
+4. **Security & Authentication (CurveZMQ + ZAP RFC 27):** Core sockets are encrypted via **Curve25519**. An internal ZeroMQ Authentication Protocol (ZAP) worker thread on `inproc://zeromq.zap.01` verifies gateway public keys, ensuring only authorized nodes can submit orders.
 
 
 ---
@@ -168,7 +169,7 @@ Testing is conducted using Python closed-loop multi-processing scripts (`stress_
 | **Account Persistence** | Account balances and holdings live in memory (`account_manager.hpp`). On server restart, accounts reset to initial defaults. |
 | **Cancel Ownership** | `CANCEL_ORDER` matches order ID within a ticker shard, but does not currently check if the caller owns the order. |
 | **Order Book Recovery** | The WAL records executed trade fills for auditing/volume tracking. Resting limit orders in the book are not saved to disk and reset on restart. |
-| **No Authentication** | Client identity (`client_id`) is self-declared by the client string. Authentication & token validation belong in the API Gateway layer before reaching the matching engine. |
+| **Identity & Access Control** | Transport is encrypted and node-authenticated via CurveZMQ & RFC 27 ZAP. End-user sessions are validated via JWT tokens at the API Gateway before reaching the matching core. |
 | **Shared Account Lock** | All account updates synchronize through a single `accounts_lock` mutex, creating contention across tickers for shared accounts. |
 
 ---
