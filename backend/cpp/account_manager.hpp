@@ -7,7 +7,7 @@
 
 
 struct Account {
-    double cash = 100000.0;
+    double cash = 10000000.0;
     std::unordered_map<std::string, int> holdings;   // ticker → quantity owned
 };
 

@@ -67,18 +67,31 @@ req_lock = asyncio.Lock()
 async def send_zmq_request(command: str) -> str:
     global req_socket
     async with req_lock:
-        await req_socket.send_string(command)
         try:
+            await req_socket.send_string(command)
             response = await req_socket.recv_string()
             return response
         except zmq.error.Again:
-            logger.error("ZMQ REQ timed out. C++ server might be down.")
+            logger.warning("ZMQ REQ timed out. C++ server might be busy or offline.")
             for conn in list(manager.active_connections):
-                await conn.close()
-            
-            req_socket.close()
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+            try:
+                req_socket.close(linger=0)
+            except Exception:
+                pass
             req_socket = create_req_socket()
             raise Exception("Server offline")
+        except Exception as e:
+            logger.warning(f"ZMQ REQ state error ({e}). Resetting socket.")
+            try:
+                req_socket.close(linger=0)
+            except Exception:
+                pass
+            req_socket = create_req_socket()
+            raise
 
 def parse_orderbook_text(text: str, ticker: str) -> dict:
     """

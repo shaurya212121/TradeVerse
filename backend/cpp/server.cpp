@@ -117,7 +117,7 @@ void chatbox_worker_routine(zmq::context_t* context) {
             if (cid.empty()) { reply_msg = "REJECTED | Client ID cannot be empty."; }
             else {
                 register_account(cid);
-                reply_msg = "SUCCESS | Client '" + cid + "' registered with $100,000.00 cash.";
+                reply_msg = "SUCCESS | Client '" + cid + "' registered with $10,000,000.00 cash.";
             }
         }
         else if (client_msg.rfind("ACCOUNT:", 0) == 0) {
@@ -196,7 +196,8 @@ void chatbox_worker_routine(zmq::context_t* context) {
                         double est_price = 0.0;
                         if (action == "BUY") {
                             auto [bid, ask] = get_best_bid_ask(ticker);
-                            est_price = (ask > 0) ? ask : 999999.0;
+                            double fallback_p = (ticker_price_locks.count(ticker) && live_market_prices.count(ticker)) ? live_market_prices.at(ticker).price : 100.0;
+                            est_price = (ask > 0) ? ask : fallback_p;
                             rejection = validate_buy(client_id, ticker, qty, est_price);
                         } else {
                             rejection = validate_sell(client_id, ticker, qty);

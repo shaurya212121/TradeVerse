@@ -90,7 +90,7 @@ inline void seed_orderbook(const std::string& ticker, double base_price) {
     OrderBook& book = order_books[ticker];
 
     std::mt19937 rng(std::hash<std::string>{}(ticker));
-    std::uniform_int_distribution<int> qty_dist(50, 500);
+    std::uniform_int_distribution<int> qty_dist(50000, 200000);
     std::string ts = get_timestamp();
 
     for (int i = 1; i <= 8; ++i) {

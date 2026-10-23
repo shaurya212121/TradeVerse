@@ -2,6 +2,14 @@ import zmq
 import time
 import statistics
 import multiprocessing
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+try:
+    from curve_auth import setup_curve_client
+except ImportError:
+    setup_curve_client = None
 
 NUM_REQUESTS_PER_WORKER = 10000
 NUM_WORKERS = multiprocessing.cpu_count() or 4
@@ -13,22 +21,27 @@ def worker(worker_id, num_requests):
     context = zmq.Context()
     socket = context.socket(zmq.REQ)
     socket.setsockopt(zmq.RCVTIMEO, 5000) # 5 second timeout
+    if setup_curve_client:
+        try:
+            setup_curve_client(socket)
+        except Exception:
+            pass
     socket.connect("tcp://localhost:5556")
     
     client_id = f"bench_{worker_id}"
     socket.send_string(f"REGISTER:{client_id}")
-    socket.recv_string()
-    
-    for _ in range(100):
-        socket.send_string(f"BUY:{client_id}:AAPL:1")
+    try:
         socket.recv_string()
+    except Exception:
+        pass
     
     latencies = []
     failures = 0
     
     for i in range(num_requests):
-        ticker = TICKERS[i % len(TICKERS)]  # Spread load across all tickers
-        side = "BUY" if i % 2 == 0 else "SELL"  # Alternate buy and sell
+        # Alternate BUY and SELL on the same ticker to keep positions and cash balanced
+        ticker = TICKERS[(i // 2) % len(TICKERS)]
+        side = "BUY" if i % 2 == 0 else "SELL"
         req_id = f"w{worker_id}_r{i}"
         
         start = time.perf_counter()
@@ -42,7 +55,7 @@ def worker(worker_id, num_requests):
         except zmq.error.Again:
             failures += 1 # Timed out
     
-    socket.close()
+    socket.close(linger=0)
     return latencies, failures
 
 
